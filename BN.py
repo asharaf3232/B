@@ -105,9 +105,7 @@ logger = logging.getLogger("MinesweeperBot_v8")
 
 # =======================================================================================
 # --- 🚀 [v8.0] إعادة هيكلة المحولات (Adapters) لإصلاح التوافقية 🚀 ---
-# =======================================================================================
-
-class BotState:
+# =======================================================================class BotState:
     """كلاس مركزي لإدارة كل حالة البوت لزيادة التنظيم."""
     def __init__(self):
         self.exchanges = {}
@@ -115,7 +113,7 @@ class BotState:
         self.last_signal_time = {}
         self.settings = {}
         self.status_snapshot = {
-            "last_scan_start_time": None, "last_scan_end_time": None,
+            "last_scan_start_timyyyyyye": None, "last_scan_end_time": None,
             "markets_found": 0, "signals_found": 0, "active_trades_count": 0,
             "scan_in_progress": False, "btc_market_mood": "غير محدد"
         }
@@ -128,9 +126,7 @@ report_lock = asyncio.Lock()
 class ExchangeAdapter:
     """كلاس أساسي مجرد لنمط المحول."""
     def __init__(self, exchange_client):
-        self.exchange = exchange_client
-
-    async def place_exit_orders(self, signal, verified_quantity):
+        self.exchange = exchange_clie async def place_exit_orders(self, signal, verified_quantity):
         raise NotImplementedError("يجب تعريف هذه الدالة في الكلاس الفرعي")
 
     async def update_trailing_stop_loss(self, trade, new_sl):
