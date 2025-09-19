@@ -16,6 +16,6 @@ jobs:
         username: ${{ secrets.VPS_SSH_USERNAME }}
         key: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
         script: |
-          cd /root/bots/B
+          cd /root/bots/New-Binance-Bot
           git pull
           pm2 reload New-Binance-Bot
