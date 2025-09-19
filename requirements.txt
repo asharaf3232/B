@@ -1,12 +1,9 @@
-aiosqlite
-websockets
-httpx
-feedparser
+ccxt
 pandas
 pandas-ta
-ccxt
-binance-connector
-nltk
+python-telegram-bot[ext, job-queue]
 scipy
-python-telegram-bot
-python-dotenv
+requests
+investpy
+feedparser
+nltk
