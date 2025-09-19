@@ -19,4 +19,5 @@ jobs:
           cd /root/bots/New-Binance-Bot
           git fetch --all
           git reset --hard origin/main
-          pm2 reload /root/bots/ecosystem.config.js
+          cd /root/bots
+          pm2 reload ecosystem.config.js
