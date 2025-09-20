@@ -1,11 +1,18 @@
 # -*- coding: utf-8 -*-
 # =======================================================================================
-# --- 🚀 Binance Trader Bot | v1.2 (CCXT Edition) 🚀 ---
+# --- 🚀 Binance Trader Bot | v1.0 (Binance Edition) 🚀 ---
 # =======================================================================================
 #
-# هذا الإصدار النهائي يحل مشكلة "DatetimeIndex" التي كانت تمنع تحليل
-# البيانات بشكل صحيح. تم مراجعة جميع نقاط إنشاء البيانات لضمان
-# التوافق الكامل مع مكتبة pandas-ta.
+# هذا هو الإصدار المخصص لمنصة Binance، والذي يترجم جميع أنظمة
+# وميزات التقرير الأصلي إلى واجهة برمجة تطبيقات Binance.
+#
+# --- Features Translated to Binance ---
+#   ✅ [Core Systems] Trade Guardian, The Supervisor, Critical Monitor
+#   ✅ [Smart Analysis] BTC Trend Filter, Fear & Greed Index
+#   ✅ [Execution] Market Sell Orders for all closures
+#   ✅ [Scanning] Batch Fetching for faster analysis
+#   ✅ [UI] Comprehensive Telegram Dashboard and Reports
+#   ✅ [Security] Reverse Sync on startup to match open positions
 #
 # =======================================================================================
 
@@ -28,13 +35,14 @@ import websockets
 import websockets.exceptions
 import httpx
 import feedparser
-import requests # Used for InvestPy
 
-# --- Data Analysis & CCXT ---
+# --- Data Analysis & Binance Specifics ---
 import pandas as pd
 import pandas_ta as ta
+from binance.client import AsyncClient
+from binance.enums import *
+from binance.exceptions import BinanceAPIException
 import ccxt.async_support as ccxt
-import investpy # Used for some data analysis
 
 # --- [ترقية] مكتبات جديدة للعقل المطور ---
 try:
@@ -247,9 +255,9 @@ async def init_database():
 async def log_pending_trade_to_db(signal, buy_order):
     try:
         async with aiosqlite.connect(DB_FILE) as conn:
-            await conn.execute("INSERT INTO trades (timestamp, symbol, reason, order_id, status, entry_price, take_profit, stop_loss, signal_strength, last_profit_notification_price) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (datetime.now(EGYPT_TZ).isoformat(), signal['symbol'], signal['reason'], buy_order['id'], 'pending', signal['entry_price'], signal['take_profit'], signal['stop_loss'], signal.get('strength', 1), signal['entry_price']))
+            await conn.execute("INSERT INTO trades (timestamp, symbol, reason, order_id, status, entry_price, take_profit, stop_loss, signal_strength, last_profit_notification_price) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (datetime.now(EGYPT_TZ).isoformat(), signal['symbol'], signal['reason'], buy_order['orderId'], 'pending', signal['entry_price'], signal['take_profit'], signal['stop_loss'], signal.get('strength', 1), signal['entry_price']))
             await conn.commit()
-            logger.info(f"Logged pending trade for {signal['symbol']} with order ID {buy_order['id']}.")
+            logger.info(f"Logged pending trade for {signal['symbol']} with order ID {buy_order['orderId']}.")
             return True
     except Exception as e: logger.error(f"DB Log Pending Error: {e}"); return False
 
@@ -336,9 +344,9 @@ async def get_market_mood():
     if s.get('btc_trend_filter_enabled', True):
         try:
             htf_period = s['trend_filters']['htf_period']
-            ohlcv = await bot_data.exchange.fetch_ohlcv('BTC/USDT', '4h', limit=htf_period + 5)
-            # FIX: Ensure DataFrame is created with correct types
-            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            client = await AsyncClient.create()
+            klines = await client.get_klines(symbol='BTCUSDT', interval=KLINE_INTERVAL_4HOUR, limit=htf_period + 5)
+            df = pd.DataFrame(klines, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'close_time', 'quote_asset_volume', 'number_of_trades', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'ignore'])
             df['close'] = pd.to_numeric(df['close'])
             df['sma'] = ta.sma(df['close'], length=htf_period)
             is_btc_bullish = df['close'].iloc[-1] > df['sma'].iloc[-1]
@@ -373,12 +381,9 @@ def analyze_breakout_squeeze_pro(df, params, rvol, adx_value):
 
 async def analyze_support_rebound(df, params, rvol, adx_value, exchange, symbol):
     try:
-        ohlcv_1h = await exchange.fetch_ohlcv(symbol, '1h', limit=100)
+        ohlcv_1h = await exchange.get_klines(symbol=symbol.replace('/', ''), interval=KLINE_INTERVAL_1HOUR, limit=100)
         if len(ohlcv_1h) < 50: return None
-        # FIX: Ensure DataFrame is created with correct types
-        df_1h = pd.DataFrame(ohlcv_1h, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        df_1h['timestamp'] = pd.to_datetime(df_1h['timestamp'], unit='ms')
-        df_1h = df_1h.set_index('timestamp').sort_index()
+        df_1h = pd.DataFrame(ohlcv_1h, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'ignore1', 'ignore2', 'ignore3', 'ignore4', 'ignore5', 'ignore6'])
         df_1h['close'] = pd.to_numeric(df_1h['close']); df_1h['low'] = pd.to_numeric(df_1h['low'])
         current_price = df_1h['close'].iloc[-1]
         recent_lows = df_1h['low'].rolling(window=10, center=True).min()
@@ -408,7 +413,7 @@ def analyze_sniper_pro(df, params, rvol, adx_value):
 
 async def analyze_whale_radar(df, params, rvol, adx_value, exchange, symbol):
     try:
-        orderbook = await exchange.fetch_order_book(symbol, limit=20)
+        orderbook = await exchange.get_order_book(symbol=symbol.replace('/',''), limit=20)
         if not orderbook or not orderbook.get('bids'): return None
         if sum(float(price) * float(qty) for price, qty in orderbook['bids'][:10]) > 30000:
             return {"reason": "whale_radar"}
@@ -458,13 +463,14 @@ SCANNERS = {
 async def activate_trade(order_id, symbol):
     bot = bot_data.application.bot; log_ctx = {'trade_id': 'N/A'}
     try:
-        order_details = await bot_data.exchange.fetch_order(order_id, symbol)
-        filled_price, gross_filled_quantity = order_details.get('average', 0.0), order_details.get('filled', 0.0)
+        client = await AsyncClient.create(BINANCE_API_KEY, BINANCE_API_SECRET)
+        order_details = await client.get_order(symbol=symbol.replace('/', ''), orderId=order_id)
+        filled_price, gross_filled_quantity = float(order_details.get('fills')[0]['price']), float(order_details.get('executedQty'))
         if gross_filled_quantity <= 0 or filled_price <= 0:
             logger.error(f"Order {order_id} invalid fill data. Price: {filled_price}, Qty: {gross_filled_quantity}."); return
         net_filled_quantity = gross_filled_quantity
-        balance_after = await bot_data.exchange.fetch_balance()
-        usdt_remaining = balance_after.get('USDT', {}).get('free', 0)
+        balance_after = await client.get_account()
+        usdt_remaining = float(next(item for item in balance_after['balances'] if item["asset"] == "USDT")['free'])
     except Exception as e:
         logger.error(f"Could not fetch data for trade activation: {e}", exc_info=True)
         async with aiosqlite.connect(DB_FILE) as conn:
@@ -522,18 +528,11 @@ async def exponential_backoff_with_jitter(run_coro, *args, **kwargs):
 class PrivateWebSocketManager:
     def __init__(self): self.ws_url = "wss://stream.binance.com:9443/ws/userStream"
     async def _run_loop(self):
-        try:
-            client = await ccxt.binance({
-                'apiKey': BINANCE_API_KEY,
-                'secret': BINANCE_API_SECRET
-            })
-            listen_key_response = await client.privatePostListenKey()
-            listen_key = listen_key_response.get('listenKey')
-            async with websockets.connect(f"{self.ws_url}?listenKey={listen_key}", ping_interval=20, ping_timeout=20) as ws:
-                self.websocket = ws; logger.info("✅ [Fast Reporter] Connected.")
-                async for msg in ws: await handle_filled_buy_order(json.loads(msg))
-        except Exception as e:
-            raise ConnectionAbortedError(f"Authentication failed: {e}")
+        client = await AsyncClient.create(BINANCE_API_KEY, BINANCE_API_SECRET)
+        listen_key = await client.stream_get_listen_key()
+        async with websockets.connect(f"{self.ws_url}?listenKey={listen_key}", ping_interval=20, ping_timeout=20) as ws:
+            self.websocket = ws; logger.info("✅ [Fast Reporter] Connected.")
+            async for msg in ws: await handle_filled_buy_order(json.loads(msg))
     async def run(self): await exponential_backoff_with_jitter(self._run_loop)
 
 async def the_supervisor_job(context: ContextTypes.DEFAULT_TYPE):
@@ -543,16 +542,17 @@ async def the_supervisor_job(context: ContextTypes.DEFAULT_TYPE):
         two_mins_ago = (datetime.now(EGYPT_TZ) - timedelta(minutes=2)).isoformat()
         stuck_trades = await (await conn.execute("SELECT * FROM trades WHERE status = 'pending' AND timestamp <= ?", (two_mins_ago,))).fetchall()
         if not stuck_trades: logger.info("🕵️ Supervisor: Audit complete. No abandoned trades found."); return
+        client = await AsyncClient.create(BINANCE_API_KEY, BINANCE_API_SECRET)
         for trade_data in stuck_trades:
             trade = dict(trade_data); order_id, symbol = trade['order_id'], trade['symbol']
             logger.warning(f"🕵️ Supervisor: Found abandoned trade #{trade['id']}. Investigating.", extra={'trade_id': trade['id']})
             try:
-                order_status = await bot_data.exchange.fetch_order(order_id, symbol)
+                order_status = await client.get_order(symbol=symbol.replace('/',''), orderId=order_id)
                 if order_status['status'] == 'FILLED':
                     logger.info(f"🕵️ Supervisor: API confirms {order_id} was filled. Activating.", extra={'trade_id': trade['id']})
                     await activate_trade(order_id, symbol)
                 elif order_status['status'] == 'CANCELED': await conn.execute("UPDATE trades SET status = 'failed' WHERE id = ?", (trade['id'],))
-                else: await bot_data.exchange.cancel_order(order_id, symbol); await conn.execute("UPDATE trades SET status = 'failed' WHERE id = ?", (trade['id'],))
+                else: await client.cancel_order(symbol=symbol.replace('/',''), orderId=order_id); await conn.execute("UPDATE trades SET status = 'failed' WHERE id = ?", (trade['id'],))
                 await conn.commit()
             except Exception as e: logger.error(f"🕵️ Supervisor: Failed to rectify trade #{trade['id']}: {e}", extra={'trade_id': trade['id']})
 
@@ -618,24 +618,23 @@ class TradeGuardian:
         logger.info(f"Guardian: Closing {symbol}. Reason: {reason}", extra=log_ctx)
         
         max_retries = bot_data.settings.get('close_retries', 3)
+        client = await AsyncClient.create(BINANCE_API_KEY, BINANCE_API_SECRET)
         
         for i in range(max_retries):
             try:
                 asset_to_sell = symbol.split('/')[0]
-                balance = await bot_data.exchange.fetch_balance()
-                available_quantity = balance.get(asset_to_sell, {}).get('free', 0.0)
+                balance = await client.get_asset_balance(asset=asset_to_sell)
+                available_quantity = float(balance['free'])
 
                 if available_quantity <= 0:
                     logger.critical(f"Attempted to close #{trade_id} but no balance for {asset_to_sell}.", extra=log_ctx)
                     async with aiosqlite.connect(DB_FILE) as conn:
-                        await conn.execute("UPDATE trades SET status = 'closure_failed', reason = 'Zero balance', close_retries = ? WHERE id = ?", (i + 1, trade['id'])); await conn.commit()
+                        await conn.execute("UPDATE trades SET status = 'closure_failed', reason = 'Zero balance', close_retries = ? WHERE id = ?", (i + 1, trade_id)); await conn.commit()
                     await safe_send_message(bot, f"🚨 **فشل حرج: لا يوجد رصيد**\n"
                                                   f"لا يمكن إغلاق الصفقة #{trade_id} لعدم توفر رصيد كافٍ من {asset_to_sell}.")
                     return
 
-                formatted_quantity = bot_data.exchange.amount_to_precision(symbol, available_quantity)
-                
-                await bot_data.exchange.create_market_sell_order(symbol, formatted_quantity)
+                order = await client.create_order(symbol=symbol.replace('/', ''), side=SIDE_SELL, type=ORDER_TYPE_MARKET, quantity=available_quantity)
                 
                 pnl = (close_price - trade['entry_price']) * trade['quantity']
                 pnl_percent = (close_price / trade['entry_price'] - 1) * 100 if trade['entry_price'] > 0 else 0
@@ -697,12 +696,15 @@ class TradeGuardian:
         except Exception as e: logger.error(f"Guardian Sync Error: {e}")
 
 class PublicWebSocketManager:
-    def __init__(self, handler_coro):
-        self.ws_url = "wss://stream.binance.com:9443/ws/!ticker@arr"
-        self.handler = handler_coro
+    def __init__(self, handler_coro): self.ws_url = "wss://stream.binance.com:9443/ws/!ticker@arr"
+    def __init__(self, handler_coro): self.ws_url = "wss://stream.binance.com:9443/ws/!ticker@arr"
+    def __init__(self, handler_coro): self.ws_url = "wss://stream.binance.com:9443/ws/!ticker@arr"
+    self.handler = handler_coro
+    self.subscriptions = set()
     async def _run_loop(self):
         async with websockets.connect(self.ws_url, ping_interval=20, ping_timeout=20) as ws:
             self.websocket = ws; logger.info("✅ [Guardian's Eyes] Connected.")
+            if self.subscriptions: await self.subscribe(list(self.subscriptions))
             async for msg in ws:
                 data = json.loads(msg)
                 if isinstance(data, list):
@@ -731,8 +733,9 @@ async def critical_trade_monitor(context: ContextTypes.DEFAULT_TYPE):
             logger.warning(f"🚨 Found a failed closure for trade #{trade['id']}. Symbol: {trade['symbol']}. Attempting manual intervention.")
             
             try:
-                ticker = await bot_data.exchange.fetch_ticker(trade['symbol'])
-                current_price = ticker.get('last')
+                client = await AsyncClient.create()
+                ticker = await client.get_symbol_ticker(symbol=trade['symbol'].replace('/', ''))
+                current_price = float(ticker['price'])
                 if not current_price:
                     logger.error(f"Could not fetch current price for {trade['symbol']} to retry close.")
                     continue
@@ -748,16 +751,17 @@ async def get_binance_markets():
     settings = bot_data.settings
     if time.time() - bot_data.last_markets_fetch > 300:
         try:
-            tickers = await bot_data.exchange.fetch_tickers()
-            bot_data.all_markets = list(tickers.values()); bot_data.last_markets_fetch = time.time()
+            client = await AsyncClient.create()
+            tickers = await client.get_ticker()
+            bot_data.all_markets = tickers; bot_data.last_markets_fetch = time.time()
         except Exception as e: logger.error(f"Failed to fetch all markets: {e}"); return []
     blacklist = settings.get('asset_blacklist', [])
-    valid_markets = [t for t in bot_data.all_markets if t.get('symbol') and t['symbol'].endswith('/USDT') and t['symbol'].split('/')[0] not in blacklist and t.get('quoteVolume', 0) > settings['liquidity_filters']['min_quote_volume_24h_usd'] and t.get('active', True)]
-    valid_markets.sort(key=lambda m: m.get('quoteVolume', 0), reverse=True)
+    valid_markets = [t for t in bot_data.all_markets if t.get('symbol') and t['symbol'].endswith('USDT') and t['symbol'].replace('USDT', '') not in blacklist and float(t.get('quoteVolume', 0)) > settings['liquidity_filters']['min_quote_volume_24h_usd']]
+    valid_markets.sort(key=lambda m: float(m.get('quoteVolume', 0)), reverse=True)
     return [t['symbol'] for t in valid_markets[:settings['top_n_symbols_by_volume']]]
 
-async def fetch_ohlcv_batch(exchange, symbols, timeframe, limit):
-    tasks = [exchange.fetch_ohlcv(s, timeframe, limit=limit) for s in symbols]
+async def fetch_ohlcv_batch(client, symbols, timeframe, limit):
+    tasks = [client.get_klines(symbol=s, interval=timeframe, limit=limit) for s in symbols]
     results = await asyncio.gather(*tasks, return_exceptions=True)
     return {symbols[i]: results[i] for i in range(len(symbols)) if not isinstance(results[i], Exception)}
     
@@ -802,9 +806,10 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
             logger.info(f"Scan skipped: Max trades ({active_trades_count}) reached."); return
 
         top_markets = await get_binance_markets()
-        symbols_to_scan = top_markets
+        symbols_to_scan = [s for s in top_markets if s.endswith('USDT')]
         
-        ohlcv_data = await fetch_ohlcv_batch(bot_data.exchange, symbols_to_scan, TIMEFRAME, 220)
+        client = await AsyncClient.create()
+        ohlcv_data = await fetch_ohlcv_batch(client, symbols_to_scan, KLINE_INTERVAL_15MINUTE, 220)
         
         queue, signals_found, analysis_errors = asyncio.Queue(), [], []
         for symbol in symbols_to_scan:
@@ -837,41 +842,33 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
                                    f"  - **مشكلات تحليل:** {len(analysis_errors)} عملة")
 
 async def worker_batch(queue, signals_list, errors_list):
-    settings, exchange = bot_data.settings, bot_data.exchange
+    settings = bot_data.settings
+    client = await AsyncClient.create()
     while not queue.empty():
         try:
             item = await queue.get()
             symbol, ohlcv = item['symbol'], item['ohlcv']
             
-            # FINAL FIX: The dataframe index must be a proper DatetimeIndex for pandas-ta
-            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'ignore1', 'ignore2', 'ignore3', 'ignore4', 'ignore5', 'ignore6'])
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-            df.set_index('timestamp', inplace=True)
-            df.sort_index(inplace=True)
-            
-            # Also convert all other columns to numeric to be safe
-            for col in ['open', 'high', 'low', 'close', 'volume']:
-                df[col] = pd.to_numeric(df[col], errors='coerce')
-            
-            # Let's ensure the volume is not zero to avoid division by zero errors
-            df['volume'] = df['volume'].replace(0, 1e-6)
-
+            df['close'] = pd.to_numeric(df['close']); df['open'] = pd.to_numeric(df['open']); df['high'] = pd.to_numeric(df['high']); df['low'] = pd.to_numeric(df['low']); df['volume'] = pd.to_numeric(df['volume'])
+            df = df.set_index('timestamp').sort_index()
             if len(df) < 50: 
                 queue.task_done()
                 continue
 
-            orderbook = await exchange.fetch_order_book(symbol, limit=1)
+            orderbook = await client.get_order_book(symbol=symbol)
             if not orderbook['bids'] or not orderbook['asks']:
                 queue.task_done()
                 continue
-            best_bid, best_ask = orderbook['bids'][0][0], orderbook['asks'][0][0]
+            best_bid, best_ask = float(orderbook['bids'][0][0]), float(orderbook['asks'][0][0])
             if best_bid <= 0:
                 queue.task_done()
                 continue
             spread_percent = ((best_ask - best_bid) / best_bid) * 100
 
             if 'whale_radar' in settings['active_scanners']:
-                whale_radar_signal = await analyze_whale_radar(df.copy(), {}, 0, 0, exchange, symbol)
+                whale_radar_signal = await analyze_whale_radar(df.copy(), {}, 0, 0, client, symbol)
                 if whale_radar_signal and spread_percent <= settings['spread_filter']['max_spread_percent'] * 2:
                     reason_str = whale_radar_signal['reason']
                     strength = 5
@@ -890,13 +887,12 @@ async def worker_batch(queue, signals_list, errors_list):
 
             is_htf_bullish = True
             if settings.get('multi_timeframe_enabled', True):
-                ohlcv_htf = await exchange.fetch_ohlcv(symbol, settings.get('multi_timeframe_htf'), limit=220)
-                df_htf = pd.DataFrame(ohlcv_htf, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                ohlcv_htf = await client.get_klines(symbol=symbol, interval=KLINE_INTERVAL_4HOUR, limit=220)
+                df_htf = pd.DataFrame(ohlcv_htf, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'ignore1', 'ignore2', 'ignore3', 'ignore4', 'ignore5', 'ignore6'])
+                df_htf['close'] = pd.to_numeric(df_htf['close'])
                 if len(df_htf) > 200:
-                    # FINAL FIX: Ensure proper DatetimeIndex for high timeframe data
                     df_htf['timestamp'] = pd.to_datetime(df_htf['timestamp'], unit='ms')
-                    df_htf.set_index('timestamp', inplace=True)
-                    df_htf.sort_index(inplace=True)
+                    df_htf = df_htf.set_index('timestamp').sort_index()
                     df_htf.ta.ema(length=200, append=True)
                     ema_col_name_htf = find_col(df_htf.columns, "EMA_200")
                     if ema_col_name_htf and pd.notna(df_htf[ema_col_name_htf].iloc[-2]):
@@ -954,7 +950,7 @@ async def worker_batch(queue, signals_list, errors_list):
                 params = settings.get(name, {})
                 func_args = {'df': df.copy(), 'params': params, 'rvol': rvol, 'adx_value': adx_value}
                 if name in ['support_rebound', 'whale_radar']:
-                    func_args.update({'exchange': exchange, 'symbol': symbol})
+                    func_args.update({'exchange': client, 'symbol': symbol})
                 result = await strategy_func(**func_args) if asyncio.iscoroutinefunction(strategy_func) else strategy_func(**{k: v for k, v in func_args.items() if k not in ['exchange', 'symbol']})
                 if result: confirmed_reasons.append(result['reason'])
 
@@ -986,10 +982,11 @@ async def initiate_real_trade(signal):
     if not bot_data.trading_enabled:
         logger.warning(f"Trade for {signal['symbol']} blocked: Kill Switch active."); return False
     try:
-        settings, exchange = bot_data.settings, bot_data.exchange
-        await exchange.load_markets()
+        settings = bot_data.settings
+        client = await AsyncClient.create(BINANCE_API_KEY, BINANCE_API_SECRET)
         trade_size = settings['real_trade_size_usdt']
-        balance = await exchange.fetch_balance(); usdt_balance = balance.get('USDT', {}).get('free', 0.0)
+        balance = await client.get_asset_balance(asset='USDT')
+        usdt_balance = float(balance['free'])
         if usdt_balance < trade_size:
              logger.error(f"Insufficient USDT for {signal['symbol']}. Have: {usdt_balance}, Need: {trade_size}")
              await safe_send_message(bot_data.application.bot, "🚨 **فشل الشراء: رصيد غير كافٍ**\n"
@@ -997,20 +994,30 @@ async def initiate_real_trade(signal):
              return False
         
         base_amount = trade_size / signal['entry_price']
-        formatted_amount = exchange.amount_to_precision(signal['symbol'], base_amount)
+        symbol_info = await client.get_symbol_info(symbol=signal['symbol'].replace('/', ''))
+        lot_size = [f for f in symbol_info['filters'] if f['filterType'] == 'LOT_SIZE'][0]
+        step_size = float(lot_size['stepSize'])
+        formatted_amount = float(f"{base_amount:.{len(str(step_size).split('.')[1])}f}")
         
-        buy_order = await exchange.create_market_buy_order(signal['symbol'], formatted_amount)
+        buy_order = await client.create_order(
+            symbol=signal['symbol'].replace('/', ''),
+            side=SIDE_BUY,
+            type=ORDER_TYPE_MARKET,
+            quantity=formatted_amount
+        )
         
         if await log_pending_trade_to_db(signal, buy_order):
             await safe_send_message(bot_data.application.bot, f"🚀 تم إرسال أمر شراء لـ `{signal['symbol']}`."); return True
         else:
-            await exchange.cancel_order(buy_order['id'], signal['symbol']); return False
-    except ccxt.InsufficientFunds as e: logger.error(f"REAL TRADE FAILED {signal['symbol']}: {e}"); await safe_send_message(bot_data.application.bot, f"⚠️ **رصيد غير كافٍ!**"); return False
-    except Exception as e: logger.error(f"REAL TRADE FAILED {signal['symbol']}: {e}", exc_info=True); return False
+            await client.cancel_order(symbol=signal['symbol'].replace('/', ''), orderId=buy_order['orderId']); return False
+    except Exception as e:
+        logger.error(f"REAL TRADE FAILED {signal['symbol']}: {e}", exc_info=True); await safe_send_message(bot_data.application.bot, f"❌ **فشل فتح صفقة**\nالسبب: {e}"); return False
 
 async def check_time_sync(context: ContextTypes.DEFAULT_TYPE):
     try:
-        server_time = await bot_data.exchange.fetch_time(); local_time = int(time.time() * 1000); diff = abs(server_time - local_time)
+        client = await AsyncClient.create()
+        server_time = await client.get_server_time()
+        local_time = int(time.time() * 1000); diff = abs(server_time['serverTime'] - local_time)
         if diff > 2000: await safe_send_message(context.bot, f"⚠️ **تحذير مزامنة الوقت** ⚠️\nفارق `{diff}` ميلي ثانية.")
         else: logger.info(f"Time sync OK. Diff: {diff}ms.")
     except Exception as e: logger.error(f"Time sync check failed: {e}")
@@ -1120,8 +1127,9 @@ async def check_trade_details(update: Update, context: ContextTypes.DEFAULT_TYPE
         message = f"**⏳ حالة الصفقة #{trade_id}**\n- **العملة:** `{trade['symbol']}`\n- **الحالة:** في انتظار تأكيد التنفيذ..."
     else:
         try:
-            ticker = await bot_data.exchange.fetch_ticker(trade['symbol'])
-            current_price = ticker['last']
+            client = await AsyncClient.create()
+            ticker = await client.get_symbol_ticker(symbol=trade['symbol'].replace('/', ''))
+            current_price = float(ticker['price'])
             pnl = (current_price - trade['entry_price']) * trade['quantity']
             pnl_percent = (current_price / trade['entry_price'] - 1) * 100 if trade['entry_price'] > 0 else 0
             pnl_text = f"💰 **الربح/الخسارة الحالية:** `${pnl:+.2f}` ({pnl_percent:+.2f}%)"
@@ -1158,16 +1166,22 @@ async def show_mood_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     translated_headlines, translation_success = await translate_text_gemini(original_headlines)
     news_sentiment, _ = analyze_sentiment_of_headlines(original_headlines)
     top_gainers, top_losers = [], []
-    if bot_data.all_markets:
-        sorted_by_change = sorted([m for m in bot_data.all_markets if m.get('percentage') is not None], key=lambda m: m['percentage'], reverse=True)
+    if all_markets_symbols:
+        client = await AsyncClient.create()
+        tickers_full = await client.get_ticker()
+        tickers_map = {t['symbol']: t for t in tickers_full}
+        
+        all_markets_data = [tickers_map[s] for s in all_markets_symbols if s in tickers_map]
+        
+        sorted_by_change = sorted([m for m in all_markets_data if m.get('priceChangePercent') is not None], key=lambda m: float(m['priceChangePercent']), reverse=True)
         top_gainers = sorted_by_change[:3]
         top_losers = sorted_by_change[-3:]
     verdict = "الحالة العامة للسوق تتطلب الحذر."
     if mood['mood'] == 'POSITIVE': verdict = "المؤشرات الفنية إيجابية، مما قد يدعم فرص الشراء."
     if fng_index and fng_index > 65: verdict = "المؤشرات الفنية إيجابية ولكن مع وجود طمع في السوق، يرجى الحذر من التقلبات."
     elif fng_index and fng_index < 30: verdict = "يسود الخوف على السوق، قد تكون هناك فرص للمدى الطويل ولكن المخاطرة عالية حالياً."
-    gainers_str = "\n".join([f"  `{g['symbol']}` `({g.get('percentage', 0):+.2f}%)`" for g in top_gainers]) or "  لا توجد بيانات."
-    losers_str = "\n".join([f"  `{l['symbol']}` `({l.get('percentage', 0):+.2f}%)`" for l in reversed(top_losers)]) or "  لا توجد بيانات."
+    gainers_str = "\n".join([f"  `{g['symbol'].replace('USDT', '/USDT')}` `({float(g.get('priceChangePercent', 0)):+.2f}%)`" for g in top_gainers]) or "  لا توجد بيانات."
+    losers_str = "\n".join([f"  `{l['symbol'].replace('USDT', '/USDT')}` `({float(l.get('priceChangePercent', 0)):+.2f}%)`" for l in reversed(top_losers)]) or "  لا توجد بيانات."
     news_header = "📰 آخر الأخبار (مترجمة آلياً):" if translation_success else "📰 آخر الأخبار (الترجمة غير متاحة):"
     news_str = "\n".join([f"  - _{h}_" for h in translated_headlines]) or "  لا توجد أخبار."
     message = (
@@ -1198,7 +1212,7 @@ async def show_strategy_report_command(update: Update, context: ContextTypes.DEF
     stats = defaultdict(lambda: {'wins': 0, 'losses': 0})
     for reason, status in trades:
         if not reason: continue
-        clean_reason = reason.split(' (')[0] # Remove extra text like (HTF Weak)
+        clean_reason = reason.split(' (')[0]
         reasons = clean_reason.split(' + ')
         for r in reasons:
             if 'ناجحة' in status or 'تأمين' in status: stats[r]['wins'] += 1
@@ -1243,34 +1257,40 @@ async def show_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def show_portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query; await query.answer("جاري جلب بيانات المحفظة...")
     try:
-        balance = await bot_data.exchange.fetch_balance()
-        owned_assets = {asset: data['total'] for asset, data in balance.items() if isinstance(data, dict) and data.get('total', 0) > 0}
-        usdt_balance = balance.get('USDT', {}).get('total', 0); total_usdt_equity = usdt_balance; free_usdt = balance.get('USDT', {}).get('free', 0)
-        assets_to_fetch = [f"{asset}/USDT" for asset in owned_assets if asset != 'USDT' and f"{asset}/USDT" in bot_data.exchange.symbols]
+        client = await AsyncClient.create(BINANCE_API_KEY, BINANCE_API_SECRET)
+        account_info = await client.get_account()
+        balances = account_info.get('balances', [])
+        owned_assets = {b['asset']: float(b['free']) + float(b['locked']) for b in balances if float(b['free']) + float(b['locked']) > 0}
+        usdt_balance = owned_assets.get('USDT', 0)
+        
+        assets_to_fetch = [f"{asset}USDT" for asset in owned_assets if asset != 'USDT' and f"{asset}USDT" in [t['symbol'] for t in bot_data.all_markets]]
         tickers = {}
         if assets_to_fetch:
-            try: tickers = await bot_data.exchange.fetch_tickers(assets_to_fetch)
+            try: tickers = {t['symbol']: float(t['price']) for t in await client.get_symbol_ticker(symbols=assets_to_fetch)}
             except Exception as e: logger.warning(f"Could not fetch all tickers for portfolio: {e}")
+        
         asset_details = []; total_assets_value_usdt = 0
         for asset, total in owned_assets.items():
             if asset == 'USDT': continue
-            symbol = f"{asset}/USDT"; value_usdt = 0
-            if symbol in tickers and tickers[symbol] is not None: value_usdt = tickers[symbol].get('last', 0) * total
+            symbol = f"{asset}USDT"; value_usdt = 0
+            if symbol in tickers: value_usdt = tickers[symbol] * total
             total_assets_value_usdt += value_usdt
             if value_usdt >= 1.0: asset_details.append(f"  - `{asset}`: `{total:,.6f}` `(≈ ${value_usdt:,.2f})`")
-        total_equity = total_usdt_equity + total_assets_value_usdt
+        total_equity = usdt_balance + total_assets_value_usdt
+        
         async with aiosqlite.connect(DB_FILE) as conn:
             cursor_pnl = await conn.execute("SELECT SUM(pnl_usdt) FROM trades WHERE status LIKE '%(%'")
             total_realized_pnl = (await cursor_pnl.fetchone())[0] or 0.0
             cursor_trades = await conn.execute("SELECT COUNT(*) FROM trades WHERE status = 'active'")
             active_trades_count = (await cursor_trades.fetchone())[0]
+        
         assets_str = "\n".join(asset_details) if asset_details else "  لا توجد أصول أخرى بقيمة تزيد عن 1 دولار."
         message = (
             f"**💼 نظرة عامة على المحفظة**\n"
             f"🗓️ {datetime.now(EGYPT_TZ).strftime('%Y-%m-%d %H:%M:%S')}\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"**💰 إجمالي قيمة المحفظة:** `≈ ${total_equity:,.2f}`\n"
-            f"  - **السيولة المتاحة (USDT):** `${free_usdt:,.2f}`\n"
+            f"  - **السيولة المتاحة (USDT):** `${usdt_balance:,.2f}`\n"
             f"  - **قيمة الأصول الأخرى:** `≈ ${total_assets_value_usdt:,.2f}`\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"**📊 تفاصيل الأصول (أكثر من 1$):**\n"
@@ -1614,29 +1634,38 @@ async def post_init(application: Application):
         try: nltk.data.find('sentiment/vader_lexicon.zip')
         except LookupError: logger.info("Downloading NLTK data..."); nltk.download('vader_lexicon', quiet=True)
     try:
-        config = {'apiKey': BINANCE_API_KEY, 'secret': BINANCE_API_SECRET, 'enableRateLimit': True}
-        bot_data.exchange = ccxt.binance(config)
-        await bot_data.exchange.load_markets()
+        bot_data.exchange = AsyncClient(BINANCE_API_KEY, BINANCE_API_SECRET)
+        await bot_data.exchange.get_exchange_info()
         
         # --- START REVERSE SYNC LOGIC ---
-        open_positions = await bot_data.exchange.fetch_positions()
+        client_ccxt = ccxt.binance({
+            'apiKey': BINANCE_API_KEY,
+            'secret': BINANCE_API_SECRET,
+            'enableRateLimit': True,
+        })
+        open_positions = await client_ccxt.fetch_positions()
         async with aiosqlite.connect(DB_FILE) as conn:
             conn.row_factory = aiosqlite.Row
             trades_in_db = await (await conn.execute("SELECT * FROM trades WHERE status = 'active'")).fetchall()
             
             for trade in trades_in_db:
-                position_on_exchange = next((p for p in open_positions if p['symbol'] == trade['symbol'] and float(p['contracts']) > 0), None)
+                position_on_exchange = next((p for p in open_positions if p['info']['symbol'] == trade['symbol'].replace('/', '') and float(p['info']['positionAmt']) > 0), None)
                 if not position_on_exchange:
                     logger.warning(f"Trade #{trade['id']} for {trade['symbol']} found in DB but not on exchange. Status changed to 'Closed Manually'.")
                     await conn.execute("UPDATE trades SET status = 'مغلقة يدوياً' WHERE id = ?", (trade['id'],))
             
             trades_in_db_symbols = {t['symbol'] for t in trades_in_db}
             for position in open_positions:
-                symbol_ccxt = position['symbol']
-                if float(position['contracts']) > 0 and symbol_ccxt not in trades_in_db_symbols:
+                symbol_binance = position['info']['symbol']
+                symbol = f"{symbol_binance}USDT" if 'USDT' in symbol_binance else f"{symbol_binance}BUSD" # Fallback
+                symbol_ccxt = f"{symbol_binance[:-4]}/{symbol_binance[-4:]}"
+                
+                if float(position['info']['positionAmt']) > 0 and symbol_ccxt not in trades_in_db_symbols:
                     logger.warning(f"🚨 Found active trade for {symbol_ccxt} on exchange not in DB. Restoring...")
-                    entry_price = position.get('entryPrice', 0.0)
-                    quantity = position.get('contracts', 0.0)
+                    entry_price = float(position['info'].get('entryPrice', 0.0))
+                    quantity = float(position['info']['positionAmt'])
+                    
+                    if 'isolatedWallet' in position['info']: continue # Skip isolated margin and futures
                     
                     await conn.execute("INSERT INTO trades (timestamp, symbol, entry_price, take_profit, stop_loss, quantity, status, reason, signal_strength, last_profit_notification_price) VALUES (?, ?, ?, ?, ?, ?, 'active', 'Restored on startup', 1, ?)", (datetime.now(EGYPT_TZ).isoformat(), symbol_ccxt, entry_price, entry_price * 1.5, entry_price * 0.9, quantity, entry_price))
                     await safe_send_message(application.bot, f"⚠️ **تم استعادة صفقة** ⚠️\nتم العثور على صفقة لـ `{symbol_ccxt}` على المنصة وإضافتها إلى قاعدة البيانات. يرجى مراجعة إعدادات الوقف والهدف يدوياً.")
@@ -1644,7 +1673,7 @@ async def post_init(application: Application):
             await conn.commit()
         # --- END REVERSE SYNC LOGIC ---
 
-        await bot_data.exchange.fetch_balance()
+        await bot_data.exchange.get_account_info()
         logger.info("✅ Successfully connected to Binance.")
     except Exception as e:
         logger.critical(f"🔥 FATAL: Could not connect to Binance: {e}", exc_info=True); return
@@ -1668,11 +1697,11 @@ async def post_init(application: Application):
     logger.info("--- Binance Trader Bot is now fully operational ---")
 
 async def post_shutdown(application: Application):
-    if bot_data.exchange: await bot_data.exchange.close()
+    if bot_data.exchange: await bot_data.exchange.close_connection()
     logger.info("Bot has shut down.")
 
 def main():
-    logger.info("--- Starting Binance Trader Bot v1.2 (CCXT Edition) ---")
+    logger.info("--- Starting Binance Trader Bot v1.0 (Binance Edition) ---")
     load_settings(); asyncio.run(init_database())
     app_builder = Application.builder().token(TELEGRAM_BOT_TOKEN)
     app_builder.post_init(post_init).post_shutdown(post_shutdown)
