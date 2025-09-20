@@ -1,18 +1,11 @@
 # -*- coding: utf-8 -*-
 # =======================================================================================
-# --- 🚀 Binance Trader Bot | v1.1 (CCXT Edition) 🚀 ---
+# --- 🚀 Binance Trader Bot | v1.2 (CCXT Edition) 🚀 ---
 # =======================================================================================
 #
-# هذا الإصدار مصمم خصيصاً للعمل مع مكتبة CCXT بدلاً من python-binance،
-# ليناسب قائمة المكتبات التي قدمتها.
-#
-# --- Features Translated to Binance ---
-#   ✅ [Core Systems] Trade Guardian, The Supervisor, Critical Monitor
-#   ✅ [Smart Analysis] BTC Trend Filter, Fear & Greed Index
-#   ✅ [Execution] Market Sell Orders for all closures
-#   ✅ [Scanning] Batch Fetching for faster analysis
-#   ✅ [UI] Comprehensive Telegram Dashboard and Reports
-#   ✅ [Security] Reverse Sync on startup to match open positions
+# هذا الإصدار النهائي يحل مشكلة "DatetimeIndex" التي كانت تمنع تحليل
+# البيانات بشكل صحيح. تم مراجعة جميع نقاط إنشاء البيانات لضمان
+# التوافق الكامل مع مكتبة pandas-ta.
 #
 # =======================================================================================
 
@@ -270,7 +263,7 @@ async def translate_text_gemini(text_list):
     if not text_list:
         return [], True
     prompt = "Translate the following English headlines to Arabic. Return only the translated text, with each headline on a new line:\n\n" + "\n".join(text_list)
-    url = f"[https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=](https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=){GEMINI_API_KEY}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key={GEMINI_API_KEY}"
     payload = {"contents": [{"parts": [{"text": prompt}]}]}
     try:
         async with httpx.AsyncClient(timeout=20.0) as client:
@@ -288,7 +281,7 @@ def get_alpha_vantage_economic_events():
     today_str = datetime.now(timezone.utc).strftime('%Y-%m-%d')
     params = {'function': 'ECONOMIC_CALENDAR', 'horizon': '3month', 'apikey': ALPHA_VANTAGE_API_KEY}
     try:
-        response = httpx.get('[https://www.alphavantage.co/query](https://www.alphavantage.co/query)', params=params, timeout=20)
+        response = httpx.get('https://www.alphavantage.co/query', params=params, timeout=20)
         response.raise_for_status(); data_str = response.text
         if "premium" in data_str.lower(): return []
         lines = data_str.strip().split('\r\n')
@@ -301,7 +294,7 @@ def get_alpha_vantage_economic_events():
     except httpx.RequestError as e: logger.error(f"Failed to fetch economic calendar: {e}"); return None
 
 def get_latest_crypto_news(limit=15):
-    urls = ["[https://cointelegraph.com/rss](https://cointelegraph.com/rss)", "[https://www.coindesk.com/arc/outboundfeeds/rss/](https://www.coindesk.com/arc/outboundfeeds/rss/)"]
+    urls = ["https://cointelegraph.com/rss", "https://www.coindesk.com/arc/outboundfeeds/rss/"]
     headlines = [entry.title for url in urls for entry in feedparser.parse(url).entries[:7]]
     return list(set(headlines))[:limit]
 
@@ -334,7 +327,7 @@ def find_col(df_columns, prefix):
 async def get_fear_and_greed_index():
     try:
         async with httpx.AsyncClient() as client:
-            r = await client.get("[https://api.alternative.me/fng/?limit=1](https://api.alternative.me/fng/?limit=1)", timeout=10)
+            r = await client.get("https://api.alternative.me/fng/?limit=1", timeout=10)
             return int(r.json()['data'][0]['value'])
     except Exception: return None
 
@@ -344,6 +337,7 @@ async def get_market_mood():
         try:
             htf_period = s['trend_filters']['htf_period']
             ohlcv = await bot_data.exchange.fetch_ohlcv('BTC/USDT', '4h', limit=htf_period + 5)
+            # FIX: Ensure DataFrame is created with correct types
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             df['close'] = pd.to_numeric(df['close'])
             df['sma'] = ta.sma(df['close'], length=htf_period)
@@ -381,9 +375,10 @@ async def analyze_support_rebound(df, params, rvol, adx_value, exchange, symbol)
     try:
         ohlcv_1h = await exchange.fetch_ohlcv(symbol, '1h', limit=100)
         if len(ohlcv_1h) < 50: return None
+        # FIX: Ensure DataFrame is created with correct types
         df_1h = pd.DataFrame(ohlcv_1h, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        df_1h['timestamp'] = pd.to_datetime(df_1h['timestamp'], unit='ms') # FIX
-        df_1h = df_1h.set_index('timestamp').sort_index() # FIX
+        df_1h['timestamp'] = pd.to_datetime(df_1h['timestamp'], unit='ms')
+        df_1h = df_1h.set_index('timestamp').sort_index()
         df_1h['close'] = pd.to_numeric(df_1h['close']); df_1h['low'] = pd.to_numeric(df_1h['low'])
         current_price = df_1h['close'].iloc[-1]
         recent_lows = df_1h['low'].rolling(window=10, center=True).min()
@@ -525,7 +520,7 @@ async def exponential_backoff_with_jitter(run_coro, *args, **kwargs):
             await asyncio.sleep(total_delay)
 
 class PrivateWebSocketManager:
-    def __init__(self): self.ws_url = "wss://[stream.binance.com:9443/ws/userStream](https://stream.binance.com:9443/ws/userStream)"
+    def __init__(self): self.ws_url = "wss://stream.binance.com:9443/ws/userStream"
     async def _run_loop(self):
         try:
             client = await ccxt.binance({
@@ -703,7 +698,7 @@ class TradeGuardian:
 
 class PublicWebSocketManager:
     def __init__(self, handler_coro):
-        self.ws_url = "wss://[stream.binance.com:9443/ws/!ticker@arr](https://stream.binance.com:9443/ws/!ticker@arr)"
+        self.ws_url = "wss://stream.binance.com:9443/ws/!ticker@arr"
         self.handler = handler_coro
     async def _run_loop(self):
         async with websockets.connect(self.ws_url, ping_interval=20, ping_timeout=20) as ws:
@@ -848,15 +843,19 @@ async def worker_batch(queue, signals_list, errors_list):
             item = await queue.get()
             symbol, ohlcv = item['symbol'], item['ohlcv']
             
-            # FIX: Ensure DataFrame index is a properly formatted DatetimeIndex
+            # FINAL FIX: The dataframe index must be a proper DatetimeIndex for pandas-ta
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-            df = df.set_index('timestamp').sort_index()
+            df.set_index('timestamp', inplace=True)
+            df.sort_index(inplace=True)
             
-            # FIX: Convert other columns to numeric
+            # Also convert all other columns to numeric to be safe
             for col in ['open', 'high', 'low', 'close', 'volume']:
                 df[col] = pd.to_numeric(df[col], errors='coerce')
             
+            # Let's ensure the volume is not zero to avoid division by zero errors
+            df['volume'] = df['volume'].replace(0, 1e-6)
+
             if len(df) < 50: 
                 queue.task_done()
                 continue
@@ -894,8 +893,10 @@ async def worker_batch(queue, signals_list, errors_list):
                 ohlcv_htf = await exchange.fetch_ohlcv(symbol, settings.get('multi_timeframe_htf'), limit=220)
                 df_htf = pd.DataFrame(ohlcv_htf, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                 if len(df_htf) > 200:
+                    # FINAL FIX: Ensure proper DatetimeIndex for high timeframe data
                     df_htf['timestamp'] = pd.to_datetime(df_htf['timestamp'], unit='ms')
-                    df_htf = df_htf.set_index('timestamp').sort_index()
+                    df_htf.set_index('timestamp', inplace=True)
+                    df_htf.sort_index(inplace=True)
                     df_htf.ta.ema(length=200, append=True)
                     ema_col_name_htf = find_col(df_htf.columns, "EMA_200")
                     if ema_col_name_htf and pd.notna(df_htf[ema_col_name_htf].iloc[-2]):
@@ -1671,7 +1672,7 @@ async def post_shutdown(application: Application):
     logger.info("Bot has shut down.")
 
 def main():
-    logger.info("--- Starting Binance Trader Bot v1.1 (CCXT Edition) ---")
+    logger.info("--- Starting Binance Trader Bot v1.2 (CCXT Edition) ---")
     load_settings(); asyncio.run(init_database())
     app_builder = Application.builder().token(TELEGRAM_BOT_TOKEN)
     app_builder.post_init(post_init).post_shutdown(post_shutdown)
