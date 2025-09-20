@@ -270,7 +270,7 @@ async def translate_text_gemini(text_list):
     if not text_list:
         return [], True
     prompt = "Translate the following English headlines to Arabic. Return only the translated text, with each headline on a new line:\n\n" + "\n".join(text_list)
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key={GEMINI_API_KEY}"
+    url = f"[https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=](https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=){GEMINI_API_KEY}"
     payload = {"contents": [{"parts": [{"text": prompt}]}]}
     try:
         async with httpx.AsyncClient(timeout=20.0) as client:
@@ -288,7 +288,7 @@ def get_alpha_vantage_economic_events():
     today_str = datetime.now(timezone.utc).strftime('%Y-%m-%d')
     params = {'function': 'ECONOMIC_CALENDAR', 'horizon': '3month', 'apikey': ALPHA_VANTAGE_API_KEY}
     try:
-        response = httpx.get('https://www.alphavantage.co/query', params=params, timeout=20)
+        response = httpx.get('[https://www.alphavantage.co/query](https://www.alphavantage.co/query)', params=params, timeout=20)
         response.raise_for_status(); data_str = response.text
         if "premium" in data_str.lower(): return []
         lines = data_str.strip().split('\r\n')
@@ -301,7 +301,7 @@ def get_alpha_vantage_economic_events():
     except httpx.RequestError as e: logger.error(f"Failed to fetch economic calendar: {e}"); return None
 
 def get_latest_crypto_news(limit=15):
-    urls = ["https://cointelegraph.com/rss", "https://www.coindesk.com/arc/outboundfeeds/rss/"]
+    urls = ["[https://cointelegraph.com/rss](https://cointelegraph.com/rss)", "[https://www.coindesk.com/arc/outboundfeeds/rss/](https://www.coindesk.com/arc/outboundfeeds/rss/)"]
     headlines = [entry.title for url in urls for entry in feedparser.parse(url).entries[:7]]
     return list(set(headlines))[:limit]
 
@@ -334,7 +334,7 @@ def find_col(df_columns, prefix):
 async def get_fear_and_greed_index():
     try:
         async with httpx.AsyncClient() as client:
-            r = await client.get("https://api.alternative.me/fng/?limit=1", timeout=10)
+            r = await client.get("[https://api.alternative.me/fng/?limit=1](https://api.alternative.me/fng/?limit=1)", timeout=10)
             return int(r.json()['data'][0]['value'])
     except Exception: return None
 
@@ -382,6 +382,9 @@ async def analyze_support_rebound(df, params, rvol, adx_value, exchange, symbol)
         ohlcv_1h = await exchange.fetch_ohlcv(symbol, '1h', limit=100)
         if len(ohlcv_1h) < 50: return None
         df_1h = pd.DataFrame(ohlcv_1h, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        df_1h['timestamp'] = pd.to_datetime(df_1h['timestamp'], unit='ms') # FIX
+        df_1h = df_1h.set_index('timestamp').sort_index() # FIX
+        df_1h['close'] = pd.to_numeric(df_1h['close']); df_1h['low'] = pd.to_numeric(df_1h['low'])
         current_price = df_1h['close'].iloc[-1]
         recent_lows = df_1h['low'].rolling(window=10, center=True).min()
         supports = recent_lows[recent_lows.notna()]
@@ -522,10 +525,13 @@ async def exponential_backoff_with_jitter(run_coro, *args, **kwargs):
             await asyncio.sleep(total_delay)
 
 class PrivateWebSocketManager:
-    def __init__(self): self.ws_url = "wss://stream.binance.com:9443/ws/userStream"
+    def __init__(self): self.ws_url = "wss://[stream.binance.com:9443/ws/userStream](https://stream.binance.com:9443/ws/userStream)"
     async def _run_loop(self):
         try:
-            client = await ccxt.binance().load_markets()
+            client = await ccxt.binance({
+                'apiKey': BINANCE_API_KEY,
+                'secret': BINANCE_API_SECRET
+            })
             listen_key_response = await client.privatePostListenKey()
             listen_key = listen_key_response.get('listenKey')
             async with websockets.connect(f"{self.ws_url}?listenKey={listen_key}", ping_interval=20, ping_timeout=20) as ws:
@@ -697,7 +703,7 @@ class TradeGuardian:
 
 class PublicWebSocketManager:
     def __init__(self, handler_coro):
-        self.ws_url = "wss://stream.binance.com:9443/ws/!ticker@arr"
+        self.ws_url = "wss://[stream.binance.com:9443/ws/!ticker@arr](https://stream.binance.com:9443/ws/!ticker@arr)"
         self.handler = handler_coro
     async def _run_loop(self):
         async with websockets.connect(self.ws_url, ping_interval=20, ping_timeout=20) as ws:
@@ -842,10 +848,15 @@ async def worker_batch(queue, signals_list, errors_list):
             item = await queue.get()
             symbol, ohlcv = item['symbol'], item['ohlcv']
             
+            # FIX: Ensure DataFrame index is a properly formatted DatetimeIndex
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-            df['close'] = pd.to_numeric(df['close']); df['open'] = pd.to_numeric(df['open']); df['high'] = pd.to_numeric(df['high']); df['low'] = pd.to_numeric(df['low']); df['volume'] = pd.to_numeric(df['volume'])
             df = df.set_index('timestamp').sort_index()
+            
+            # FIX: Convert other columns to numeric
+            for col in ['open', 'high', 'low', 'close', 'volume']:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+            
             if len(df) < 50: 
                 queue.task_done()
                 continue
@@ -1234,7 +1245,7 @@ async def show_portfolio_command(update: Update, context: ContextTypes.DEFAULT_T
         balance = await bot_data.exchange.fetch_balance()
         owned_assets = {asset: data['total'] for asset, data in balance.items() if isinstance(data, dict) and data.get('total', 0) > 0}
         usdt_balance = balance.get('USDT', {}).get('total', 0); total_usdt_equity = usdt_balance; free_usdt = balance.get('USDT', {}).get('free', 0)
-        assets_to_fetch = [f"{asset}/USDT" for asset in owned_assets if asset != 'USDT']
+        assets_to_fetch = [f"{asset}/USDT" for asset in owned_assets if asset != 'USDT' and f"{asset}/USDT" in bot_data.exchange.symbols]
         tickers = {}
         if assets_to_fetch:
             try: tickers = await bot_data.exchange.fetch_tickers(assets_to_fetch)
@@ -1613,7 +1624,7 @@ async def post_init(application: Application):
             trades_in_db = await (await conn.execute("SELECT * FROM trades WHERE status = 'active'")).fetchall()
             
             for trade in trades_in_db:
-                position_on_exchange = next((p for p in open_positions if p['info']['symbol'] == trade['symbol'].replace('/', '') and float(p['info']['positionAmt']) > 0), None)
+                position_on_exchange = next((p for p in open_positions if p['symbol'] == trade['symbol'] and float(p['contracts']) > 0), None)
                 if not position_on_exchange:
                     logger.warning(f"Trade #{trade['id']} for {trade['symbol']} found in DB but not on exchange. Status changed to 'Closed Manually'.")
                     await conn.execute("UPDATE trades SET status = 'مغلقة يدوياً' WHERE id = ?", (trade['id'],))
@@ -1621,7 +1632,7 @@ async def post_init(application: Application):
             trades_in_db_symbols = {t['symbol'] for t in trades_in_db}
             for position in open_positions:
                 symbol_ccxt = position['symbol']
-                if float(position['info']['positionAmt']) > 0 and symbol_ccxt not in trades_in_db_symbols:
+                if float(position['contracts']) > 0 and symbol_ccxt not in trades_in_db_symbols:
                     logger.warning(f"🚨 Found active trade for {symbol_ccxt} on exchange not in DB. Restoring...")
                     entry_price = position.get('entryPrice', 0.0)
                     quantity = position.get('contracts', 0.0)
