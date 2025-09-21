@@ -83,12 +83,12 @@ from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKe
 from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters, CallbackQueryHandler
 from telegram.error import BadRequest, TimedOut, Forbidden
-from dotenv import load_dotenv
+# from dotenv import load_dotenv
 
 # =======================================================================================
 # --- ⚙️ Core Configuration ⚙️ ---
 # =======================================================================================
-load_dotenv()
+# load_dotenv()
 
 # --- NEW: Binance API Keys ---
 BINANCE_API_KEY = os.getenv('BINANCE_API_KEY')
@@ -1580,4 +1580,5 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
