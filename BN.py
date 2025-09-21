@@ -581,11 +581,16 @@ async def initiate_real_trade(signal):
         settings, exchange = bot_data.settings, bot_data.exchange; await exchange.load_markets()
         trade_size = settings['real_trade_size_usdt']
         balance = await exchange.fetch_balance(); usdt_balance = balance.get('USDT', {}).get('free', 0.0)
+        
+        # --- تحديث: فحص كافية الرصيد قبل محاولة فتح الصفقة ---
         if usdt_balance < trade_size:
              logger.error(f"Insufficient USDT for {signal['symbol']}. Have: {usdt_balance}, Need: {trade_size}")
              await safe_send_message(bot_data.application.bot, "🚨 **فشل الشراء: رصيد غير كافٍ**\n"
-                                                              f"لا يمكن فتح صفقة جديدة لأن رصيدك من USDT أقل من حجم الصفقة المحدَّد.")
+                                                              f"لا يمكن فتح صفقة جديدة لأن رصيدك من USDT (`${usdt_balance:,.2f}`) أقل من حجم الصفقة المحدَّد (`${trade_size:,.2f}`).\n"
+                                                              f"تم إيقاف الفحص مؤقتاً لتجنب تكرار الرسائل.")
+             bot_data.trading_enabled = False # إيقاف البوت لتجنب تكرار الرسالة
              return False
+        
         base_amount = trade_size / signal['entry_price']
         formatted_amount = exchange.amount_to_precision(signal['symbol'], base_amount)
         buy_order = await exchange.create_market_buy_order(signal['symbol'], formatted_amount)
@@ -593,7 +598,10 @@ async def initiate_real_trade(signal):
             await safe_send_message(bot_data.application.bot, f"🚀 تم إرسال أمر شراء لـ `{signal['symbol']}`."); return True
         else:
             await exchange.cancel_order(buy_order['id'], signal['symbol']); return False
-    except ccxt.InsufficientFunds as e: logger.error(f"REAL TRADE FAILED {signal['symbol']}: {e}"); await safe_send_message(bot_data.application.bot, f"⚠️ **رصيد غير كافٍ!**"); return False
+    except ccxt.InsufficientFunds as e:
+        logger.error(f"REAL TRADE FAILED {signal['symbol']}: {e}"); await safe_send_message(bot_data.application.bot, f"⚠️ **رصيد غير كافٍ!**");
+        bot_data.trading_enabled = False # إيقاف البوت لتجنب تكرار الرسالة
+        return False
     except Exception as e: logger.error(f"REAL TRADE FAILED {signal['symbol']}: {e}", exc_info=True); return False
 
 async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
