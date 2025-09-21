@@ -1275,7 +1275,8 @@ async def handle_preset_set(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # حفظ قائمة الماسحات النشطة قبل تطبيق النمط الجديد
         current_scanners = bot_data.settings.get('active_scanners', [])
         bot_data.settings = copy.deepcopy(preset_settings)
-        bot_data.settings['active_scanners'] = current_scanners # استعادة قائمة الماسحات
+        # استعادة قائمة الماسحات النشطة
+        bot_data.settings['active_scanners'] = current_scanners 
         determine_active_preset()
         save_settings()
         await query.answer(f"✅ تم تفعيل النمط: {PRESET_NAMES_AR.get(preset_key, preset_key)}", show_alert=True)
