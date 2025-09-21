@@ -1164,16 +1164,25 @@ async def show_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await safe_edit_message(update.callback_query, message, reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def show_portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query; await query.answer("جاري جلب بيانات المحفظة...")
+    query = update.callback_query
+    # [MASTERMIND REVIEW] تم تعديل هذه الدالة لتوفير تشخيص أفضل للأخطاء
+    # لا داعي لـ query.answer هنا لأن المعالج الرئيسي يقوم بها بالفعل
+    await safe_edit_message(query, "💼 جارٍ جلب بيانات المحفظة، يرجى الانتظار...", reply_markup=None)
+
     try:
-        balance = await bot_data.exchange.fetch_balance() # Default is 'spot' for binance
+        # تمت إضافة مهلة زمنية للطلب لمنع التعليق الطويل
+        bot_data.exchange.options['httpRequestTimeout'] = 20000  # 20 ثانية
+        balance = await bot_data.exchange.fetch_balance()
+        
         owned_assets = {asset: data['total'] for asset, data in balance.items() if isinstance(data, dict) and data.get('total', 0) > 0}
         usdt_balance = balance.get('USDT', {}); total_usdt_equity = usdt_balance.get('total', 0); free_usdt = usdt_balance.get('free', 0)
+        
         assets_to_fetch = [f"{asset}/USDT" for asset in owned_assets if asset != 'USDT']
         tickers = {}
         if assets_to_fetch:
             try: tickers = await bot_data.exchange.fetch_tickers(assets_to_fetch)
             except Exception as e: logger.warning(f"Could not fetch all tickers for portfolio: {e}")
+        
         asset_details = []; total_assets_value_usdt = 0
         for asset, total in owned_assets.items():
             if asset == 'USDT': continue
@@ -1181,15 +1190,18 @@ async def show_portfolio_command(update: Update, context: ContextTypes.DEFAULT_T
             if symbol in tickers and tickers[symbol] is not None: value_usdt = tickers[symbol].get('last', 0) * total
             total_assets_value_usdt += value_usdt
             if value_usdt >= 1.0: asset_details.append(f"  - `{asset}`: `{total:,.6f}` `(≈ ${value_usdt:,.2f})`")
+
         total_equity = total_usdt_equity + total_assets_value_usdt
+        
         async with aiosqlite.connect(DB_FILE) as conn:
             cursor_pnl = await conn.execute("SELECT SUM(pnl_usdt) FROM trades WHERE status LIKE 'ناجحة%' OR status LIKE 'فاشلة%'")
             total_realized_pnl = (await cursor_pnl.fetchone())[0] or 0.0
             cursor_trades = await conn.execute("SELECT COUNT(*) FROM trades WHERE status = 'active'")
             active_trades_count = (await cursor_trades.fetchone())[0]
+            
         assets_str = "\n".join(asset_details) if asset_details else "  لا توجد أصول أخرى بقيمة تزيد عن 1 دولار."
         message = (
-            f"**💼 نظرة عامة على المحفظة**\n"
+            f"**💼 نظرة عامة على المحفظة (متصل ✅)**\n"
             f"🗓️ {datetime.now(EGYPT_TZ).strftime('%Y-%m-%d %H:%M:%S')}\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"**💰 إجمالي قيمة المحفظة:** `≈ ${total_equity:,.2f}`\n"
@@ -1205,10 +1217,21 @@ async def show_portfolio_command(update: Update, context: ContextTypes.DEFAULT_T
         )
         keyboard = [[InlineKeyboardButton("🔄 تحديث", callback_data="db_portfolio")], [InlineKeyboardButton("🔙 العودة للوحة التحكم", callback_data="back_to_dashboard")]]
         await safe_edit_message(query, message, reply_markup=InlineKeyboardMarkup(keyboard))
+
+    except ccxt.AuthenticationError:
+        error_msg = ("**🛑 فشل الاتصال: خطأ في المصادقة**\n\n"
+                     "لا يمكن الاتصال بباينانس. يرجى التحقق من:\n"
+                     "1.  **صحة مفاتيح API** في ملف `.env`.\n"
+                     "2.  **صلاحيات المفتاح** على موقع باينانس (يجب تفعيل القراءة والتداول).\n"
+                     "3.  **قيود الـ IP** (إذا كانت مفعلة).")
+        await safe_edit_message(query, error_msg, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 العودة", callback_data="back_to_dashboard")]]))
+    
     except Exception as e:
         logger.error(f"Portfolio fetch error: {e}", exc_info=True)
-        await safe_edit_message(query, f"حدث خطأ أثناء جلب رصيد المحفظة: {e}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 العودة", callback_data="back_to_dashboard")]]))
-
+        error_msg = (f"**🛑 فشل الاتصال: خطأ غير متوقع**\n\n"
+                     f"حدث خطأ أثناء محاولة الاتصال بالمنصة:\n\n`{e}`\n\n"
+                     "يرجى مراجعة نافذة الـ Console للمزيد من التفاصيل.")
+        await safe_edit_message(query, error_msg, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 العودة", callback_data="back_to_dashboard")]]))
 async def show_trade_history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     async with aiosqlite.connect(DB_FILE) as conn:
         conn.row_factory = aiosqlite.Row
@@ -1557,3 +1580,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
