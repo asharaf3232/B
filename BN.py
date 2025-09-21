@@ -38,6 +38,7 @@ import pandas as pd
 import pandas_ta as ta
 import ccxt.async_support as ccxt
 import feedparser
+import websockets
 
 # --- [ترقية] مكتبات جديدة للعقل المطور ---
 try:
@@ -64,6 +65,7 @@ from telegram.error import BadRequest, TimedOut, Forbidden
 # --- إعدادات أساسية ---
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
+
 # --- جلب المتغيرات من بيئة التشغيل (PM2) ---
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
@@ -163,6 +165,8 @@ class BotState:
         self.last_scan_info = {}
         self.all_markets = []
         self.last_markets_fetch = 0
+        self.public_ws = None
+        self.private_ws = None
 
 bot_data = BotState()
 scan_lock = asyncio.Lock()
@@ -200,7 +204,13 @@ async def init_database():
     try:
         async with aiosqlite.connect(DB_FILE) as conn:
             # Added new 'last_profit_notification_price' column
-            await conn.execute('CREATE TABLE IF NOT EXISTS trades (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT, symbol TEXT, entry_price REAL, take_profit REAL, stop_loss REAL REAL, quantity REAL, status TEXT, reason TEXT, order_id TEXT, highest_price REAL DEFAULT 0, trailing_sl_active BOOLEAN DEFAULT 0, close_price REAL, pnl_usdt REAL, signal_strength INTEGER DEFAULT 1, close_retries INTEGER DEFAULT 0, last_profit_notification_price REAL DEFAULT 0)')
+            await conn.execute('CREATE TABLE IF NOT EXISTS trades (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT, symbol TEXT, entry_price REAL, take_profit REAL, stop_loss REAL, quantity REAL, status TEXT, reason TEXT, order_id TEXT, highest_price REAL DEFAULT 0, trailing_sl_active BOOLEAN DEFAULT 0, close_price REAL, pnl_usdt REAL, signal_strength INTEGER DEFAULT 1, close_retries INTEGER DEFAULT 0, last_profit_notification_price REAL DEFAULT 0)')
+            # Add new columns if they don't exist
+            cursor = await conn.execute("PRAGMA table_info(trades)")
+            columns = [row[1] for row in await cursor.fetchall()]
+            if 'signal_strength' not in columns: await conn.execute("ALTER TABLE trades ADD COLUMN signal_strength INTEGER DEFAULT 1")
+            if 'close_retries' not in columns: await conn.execute("ALTER TABLE trades ADD COLUMN close_retries INTEGER DEFAULT 0")
+            if 'last_profit_notification_price' not in columns: await conn.execute("ALTER TABLE trades ADD COLUMN last_profit_notification_price REAL DEFAULT 0")
             await conn.commit()
         logger.info("Database initialized successfully.")
     except Exception as e: logger.critical(f"Database initialization failed: {e}")
@@ -595,7 +605,11 @@ async def initiate_real_trade(signal):
         formatted_amount = exchange.amount_to_precision(signal['symbol'], base_amount)
         buy_order = await exchange.create_market_buy_order(signal['symbol'], formatted_amount)
         if await log_pending_trade_to_db(signal, buy_order):
-            await safe_send_message(bot_data.application.bot, f"🚀 تم إرسال أمر شراء لـ `{signal['symbol']}`."); return True
+            await safe_send_message(bot_data.application.bot, f"🚀 تم إرسال أمر شراء لـ `{signal['symbol']}`.");
+            # Subscribe to the symbol after a successful trade
+            if bot_data.public_ws:
+                await bot_data.public_ws.subscribe([signal['symbol']])
+            return True
         else:
             await exchange.cancel_order(buy_order['id'], signal['symbol']); return False
     except ccxt.InsufficientFunds as e:
@@ -680,28 +694,79 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
                                    f"  - **صفقات تم فتحها:** {trades_opened_count} صفقة\n"
                                    f"  - **مشكلات تحليل:** {len(analysis_errors)} عملة")
 
-async def trade_supervisor_job(context: ContextTypes.DEFAULT_TYPE):
-    import aiosqlite
-    logger.info("--- 🕵️ Supervisor job starting... ---")
-    try:
-        async with aiosqlite.connect(DB_FILE) as conn:
-            conn.row_factory = aiosqlite.Row
-            active_trades = await (await conn.execute("SELECT * FROM trades WHERE status = 'active'")).fetchall()
-        if not active_trades: return
+class BinanceWebSocketManager:
+    """Manages WebSocket connections for real-time price updates."""
+    def __init__(self):
+        self.ws = None
+        self.uri = "wss://stream.binance.com:9443/ws/"
+        self.subscriptions = set()
+        self.ticker_queue = asyncio.Queue()
+        self.is_connected = False
 
-        symbols = [trade['symbol'] for trade in active_trades]
-        tickers = await bot_data.exchange.fetch_tickers(symbols)
-
-        for trade_data in active_trades:
-            trade = dict(trade_data)
-            symbol = trade['symbol']
-            if symbol not in tickers: continue
-            current_price = tickers[symbol]['last']
+    async def _handle_message(self, message):
+        data = json.loads(message)
+        if 'e' in data and data['e'] == 'kline':
+            symbol = data['s'].replace('USDT', '/USDT')
+            price = float(data['k']['c'])
+            await self.ticker_queue.put({'symbol': symbol, 'price': price})
             
-            await check_and_close_trade(trade, current_price, context)
-            await check_incremental_profit(trade, current_price, context)
+    async def _manage_connections(self):
+        while True:
+            if not self.subscriptions:
+                await asyncio.sleep(5)
+                continue
+            
+            stream_name = '/'.join([f"{s.lower().replace('/', '')}@kline_1m" for s in self.subscriptions])
+            current_uri = self.uri + stream_name
 
-    except Exception as e: logger.error(f"Supervisor error: {e}", exc_info=True)
+            if self.is_connected and self.ws and not self.ws.closed:
+                await asyncio.sleep(5)
+                continue
+
+            try:
+                logger.info(f"Connecting to Binance WebSocket for: {list(self.subscriptions)}")
+                self.ws = await websockets.connect(current_uri, ping_interval=30, ping_timeout=10)
+                self.is_connected = True
+                logger.info("Binance WebSocket connected.")
+
+                async for message in self.ws:
+                    await self._handle_message(message)
+            
+            except (websockets.exceptions.ConnectionClosed, Exception) as e:
+                logger.error(f"Binance WebSocket connection lost or failed: {e}. Reconnecting...")
+                self.is_connected = False
+                await asyncio.sleep(5)
+
+    def start(self):
+        asyncio.create_task(self._manage_connections())
+        asyncio.create_task(self._process_queue())
+
+    async def subscribe(self, symbols):
+        new_symbols = [s for s in symbols if s not in self.subscriptions]
+        if new_symbols:
+            self.subscriptions.update(new_symbols)
+            logger.info(f"Subscribed to new symbols: {new_symbols}")
+            # Force a reconnect to update the stream list
+            if self.ws:
+                await self.ws.close()
+    
+    async def unsubscribe(self, symbols):
+        for s in symbols:
+            self.subscriptions.discard(s)
+        logger.info(f"Unsubscribed from symbols: {symbols}")
+        if self.ws:
+            await self.ws.close()
+
+    async def _process_queue(self):
+        while True:
+            ticker_data = await self.ticker_queue.get()
+            async with aiosqlite.connect(DB_FILE) as conn:
+                conn.row_factory = aiosqlite.Row
+                trade = await (await conn.execute("SELECT * FROM trades WHERE symbol = ? AND status = 'active'", (ticker_data['symbol'],))).fetchone()
+                if trade:
+                    await check_and_close_trade(dict(trade), ticker_data['price'], bot_data.application)
+                    await check_incremental_profit(dict(trade), ticker_data['price'], bot_data.application)
+            self.ticker_queue.task_done()
 
 async def check_and_close_trade(trade, current_price, context):
     import aiosqlite
@@ -798,6 +863,10 @@ async def close_trade(trade, reason, close_price, context):
             async with aiosqlite.connect(DB_FILE) as conn:
                 await conn.execute("UPDATE trades SET status = ?, close_price = ?, pnl_usdt = ?, close_retries = 0 WHERE id = ?", (reason, close_price_final, pnl, trade['id'])); await conn.commit()
             
+            # Unsubscribe from the symbol when the trade is closed
+            if bot_data.public_ws:
+                await bot_data.public_ws.unsubscribe([symbol])
+
             start_dt = datetime.fromisoformat(trade['timestamp']); end_dt = datetime.now(EGYPT_TZ)
             duration = end_dt - start_dt
             days, rem = divmod(duration.total_seconds(), 86400); hours, rem = divmod(rem, 3600); minutes, _ = divmod(rem, 60)
@@ -822,6 +891,9 @@ async def close_trade(trade, reason, close_price, context):
     async with aiosqlite.connect(DB_FILE) as conn:
         await conn.execute("UPDATE trades SET status = 'closure_failed', reason = 'Max retries exceeded' WHERE id = ?", (trade_id,)); await conn.commit()
     await safe_send_message(bot, f"🚨 **فشل حرج** 🚨\nفشل إغلاق الصفقة `#{trade_id}` بعد عدة محاولات. الرجاء مراجعة المنصة يدوياً.")
+    # Unsubscribe even on critical failure
+    if bot_data.public_ws:
+        await bot_data.public_ws.unsubscribe([symbol])
 
 # --- واجهة تليجرام المتقدمة ---
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1420,13 +1492,20 @@ async def post_init(application: Application):
     load_settings()
     await init_database()
 
+    # Initialize WebSocket Manager
+    bot_data.public_ws = BinanceWebSocketManager()
+    bot_data.public_ws.start()
+
+    # Sync active trades with WebSocket subscriptions on startup
     async with aiosqlite.connect(DB_FILE) as conn:
-        conn.row_factory = aiosqlite.Row
-        trades_in_db = await (await conn.execute("SELECT * FROM trades WHERE status = 'active'")).fetchall()
-        
+        active_symbols = [row[0] for row in await (await conn.execute("SELECT DISTINCT symbol FROM trades WHERE status = 'active'")).fetchall()]
+        if active_symbols:
+            await bot_data.public_ws.subscribe(active_symbols)
+
+
     job_queue = application.job_queue
     job_queue.run_repeating(perform_scan, interval=SCAN_INTERVAL_SECONDS, first=10, name="perform_scan")
-    job_queue.run_repeating(trade_supervisor_job, interval=SUPERVISOR_INTERVAL_SECONDS, first=30, name="the_supervisor_job")
+    # The supervisor job is now replaced by the WebSocket's _process_queue
     job_queue.run_daily(send_daily_report, time=dt_time(hour=23, minute=55, tzinfo=EGYPT_TZ), name='daily_report')
 
     logger.info(f"Jobs scheduled. Daily report at 23:55.")
@@ -1437,6 +1516,8 @@ async def post_init(application: Application):
 
 async def post_shutdown(application: Application):
     if bot_data.exchange: await bot_data.exchange.close()
+    if bot_data.public_ws and bot_data.public_ws.ws:
+        await bot_data.public_ws.ws.close()
     logger.info("Bot has shut down.")
 
 def main():
