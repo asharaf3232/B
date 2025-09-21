@@ -15,6 +15,8 @@
 #   ✅ [المنصة] تم التأكد من أن كل جزء في الكود متوافق 100% مع Binance Spot.
 #   ✅ [الإعدادات] تم إصلاح الأنماط الجاهزة لتعمل بشكل صحيح مع الماسحات.
 #   ✅ [إصلاح الأخطاء] تم إصلاح مشكلة عدم استجابة زر الفحص اليدوي والفحص التلقائي.
+#   ✅ [إصلاح_جديد] تم إصلاح مشكلة إيقاف الفحص عند عدم وجود رصيد كاف.
+#   ✅ [إصلاح_جديد] تم إضافة نظام تأكيد فوري للصفقات لكي لا تظل "قيد الانتظار".
 #
 # =======================================================================================
 
@@ -25,6 +27,7 @@ import asyncio
 import json
 import time
 import copy
+import random
 from datetime import datetime, timedelta, timezone, time as dt_time
 from zoneinfo import ZoneInfo
 from collections import defaultdict, Counter
@@ -32,6 +35,7 @@ import httpx
 import hmac
 import base64
 import re
+import aiosqlite
 
 # --- مكتبات التحليل والتداول ---
 import pandas as pd
@@ -39,6 +43,7 @@ import pandas_ta as ta
 import ccxt.async_support as ccxt
 import feedparser
 import websockets
+import websockets.exceptions
 
 # --- [ترقية] مكتبات جديدة للعقل المطور ---
 try:
@@ -113,6 +118,7 @@ DEFAULT_SETTINGS = {
     "close_retries": 3,
     "incremental_notifications_enabled": True,
     "incremental_notification_percent": 2.0,
+    "sent_insufficient_funds_warning": False # new flag to handle the one-time warning
 }
 
 STRATEGY_NAMES_AR = {
@@ -583,6 +589,115 @@ async def worker_batch(queue, signals_list, errors_list):
             if not queue.empty():
                 queue.task_done()
 
+async def activate_trade_binance(order_id, symbol):
+    """
+    Activates a pending trade after a filled buy order is confirmed.
+    This function is a core part of the new system to avoid 'pending' status.
+    """
+    bot = bot_data.application.bot
+    log_ctx = {'trade_id': 'N/A'}
+    try:
+        order_details = await bot_data.exchange.fetch_order(order_id, symbol)
+        if order_details['status'] != 'closed':
+            logger.warning(f"Order {order_id} not yet closed, status is {order_details['status']}. Will check again later.")
+            return
+
+        filled_price, gross_filled_quantity = order_details.get('average', 0.0), order_details.get('filled', 0.0)
+        if gross_filled_quantity <= 0 or filled_price <= 0:
+            logger.error(f"Order {order_id} invalid fill data. Price: {filled_price}, Qty: {gross_filled_quantity}.")
+            async with aiosqlite.connect(DB_FILE) as conn:
+                await conn.execute("UPDATE trades SET status = 'failed', reason = 'Activation Fetch Error' WHERE order_id = ?", (order_id,))
+                await conn.commit()
+            return
+        
+        # Binance returns filled amount *before* fees are deducted from base asset
+        # We need to fetch balance to get the actual net quantity.
+        balance_after = await bot_data.exchange.fetch_balance()
+        net_filled_quantity = balance_after.get(symbol.split('/')[0], {}).get('free', 0)
+        
+        if net_filled_quantity <= 0:
+            logger.error(f"Net quantity for {order_id} is zero or less. Aborting."); 
+            async with aiosqlite.connect(DB_FILE) as conn:
+                await conn.execute("UPDATE trades SET status = 'failed', reason = 'Zero net quantity' WHERE order_id = ?", (order_id,))
+                await conn.commit()
+            return
+
+    except Exception as e:
+        logger.error(f"Could not fetch data for trade activation: {e}", exc_info=True)
+        return
+
+    async with aiosqlite.connect(DB_FILE) as conn:
+        conn.row_factory = aiosqlite.Row
+        trade = await (await conn.execute("SELECT * FROM trades WHERE order_id = ? AND status = 'pending'", (order_id,))).fetchone()
+        if not trade:
+            logger.info(f"Activation ignored for {order_id}: Trade not pending.");
+            return
+        
+        trade = dict(trade)
+        log_ctx['trade_id'] = trade['id']
+        logger.info(f"Activating trade #{trade['id']} for {symbol}...", extra=log_ctx)
+        
+        # Recalculate TP/SL based on actual filled price
+        risk = filled_price - trade['stop_loss']
+        new_take_profit = filled_price + (risk * bot_data.settings['risk_reward_ratio'])
+        await conn.execute("UPDATE trades SET status = 'active', entry_price = ?, quantity = ?, take_profit = ? WHERE id = ?", (filled_price, net_filled_quantity, new_take_profit, trade['id']))
+        active_trades_count = (await (await conn.execute("SELECT COUNT(*) FROM trades WHERE status = 'active'")).fetchone())[0]
+        await conn.commit()
+
+    if bot_data.public_ws:
+        await bot_data.public_ws.subscribe([symbol])
+
+    usdt_remaining = balance_after.get('USDT', {}).get('free', 0)
+    trade_cost, tp_percent, sl_percent = filled_price * net_filled_quantity, (new_take_profit / filled_price - 1) * 100, (1 - trade['stop_loss'] / filled_price) * 100
+    
+    reasons_en = trade['reason'].split(' + ')
+    reasons_ar = [STRATEGY_NAMES_AR.get(r.strip(), r.strip()) for r in reasons_en]
+    reason_display_str = ' + '.join(reasons_ar)
+    strength_stars = '⭐' * trade.get('signal_strength', 1)
+    
+    success_msg = (f"✅ **تم تأكيد الشراء | {symbol}**\n"
+                   f"**الاستراتيجية:** {reason_display_str}\n"
+                   f"**قوة الإشارة:** {strength_stars}\n"
+                   f"🔸 **الصفقة رقم:** #{trade['id']}\n"
+                   f"🔸 **سعر التنفيذ:** `${filled_price:,.4f}`\n"
+                   f"🔸 **الكمية (صافي):** {net_filled_quantity:,.4f} {symbol.split('/')[0]}\n"
+                   f"🔸 **التكلفة:** `${trade_cost:,.2f}`\n"
+                   f"🎯 **الهدف (TP):** `${new_take_profit:,.4f} (ربح متوقع: {tp_percent:+.2f}%)`\n"
+                   f"🛡️ **الوقف (SL):** `${trade['stop_loss']:,.4f} (خسارة مقبولة: {sl_percent:.2f}%)`\n"
+                   f"💰 **السيولة المتبقية (USDT):** `${usdt_remaining:,.2f}`\n"
+                   f"🔄 **إجمالي الصفقات النشطة:** `{active_trades_count}`\n"
+                   f"الحارس الأمين يراقب الصفقة الآن.")
+    await safe_send_message(bot, success_msg)
+
+async def check_pending_order_status(context: ContextTypes.DEFAULT_TYPE):
+    """
+    A lightweight, dedicated task to periodically check pending orders.
+    This replaces the old supervisor's trade-checking functionality.
+    """
+    logger.info("🕵️ Supervisor: Checking for pending trades...")
+    try:
+        async with aiosqlite.connect(DB_FILE) as conn:
+            conn.row_factory = aiosqlite.Row
+            pending_trades = await (await conn.execute("SELECT * FROM trades WHERE status = 'pending'")).fetchall()
+        
+        for trade_data in pending_trades:
+            trade = dict(trade_data)
+            order_id, symbol = trade['order_id'], trade['symbol']
+            logger.info(f"Checking status for pending order {order_id} on {symbol}...")
+            order_details = await bot_data.exchange.fetch_order(order_id, symbol)
+            
+            if order_details['status'] == 'closed' and order_details.get('filled', 0) > 0:
+                logger.info(f"Order {order_id} filled. Activating trade...")
+                await activate_trade_binance(order_id, symbol)
+            elif order_details['status'] == 'canceled':
+                logger.warning(f"Order {order_id} for {symbol} was canceled. Removing from DB.")
+                async with aiosqlite.connect(DB_FILE) as conn:
+                    await conn.execute("UPDATE trades SET status = 'failed' WHERE order_id = ?", (order_id,))
+                    await conn.commit()
+    except Exception as e:
+        logger.error(f"Error in pending order check: {e}", exc_info=True)
+
+
 async def initiate_real_trade(signal):
     import aiosqlite
     if not bot_data.trading_enabled:
@@ -592,31 +707,41 @@ async def initiate_real_trade(signal):
         trade_size = settings['real_trade_size_usdt']
         balance = await exchange.fetch_balance(); usdt_balance = balance.get('USDT', {}).get('free', 0.0)
         
-        # --- تحديث: فحص كافية الرصيد قبل محاولة فتح الصفقة ---
         if usdt_balance < trade_size:
-             logger.error(f"Insufficient USDT for {signal['symbol']}. Have: {usdt_balance}, Need: {trade_size}")
-             await safe_send_message(bot_data.application.bot, "🚨 **فشل الشراء: رصيد غير كافٍ**\n"
-                                                              f"لا يمكن فتح صفقة جديدة لأن رصيدك من USDT (`${usdt_balance:,.2f}`) أقل من حجم الصفقة المحدَّد (`${trade_size:,.2f}`).\n"
-                                                              f"تم إيقاف الفحص مؤقتاً لتجنب تكرار الرسائل.")
-             bot_data.trading_enabled = False # إيقاف البوت لتجنب تكرار الرسالة
+             if not settings.get('sent_insufficient_funds_warning'):
+                 await safe_send_message(bot_data.application.bot, f"🚨 **فشل الشراء: رصيد غير كافٍ**\n"
+                                                                  f"لا يمكن فتح صفقة جديدة لأن رصيدك من USDT (`${usdt_balance:,.2f}`) أقل من حجم الصفقة المحدَّد (`${trade_size:,.2f}`).\n"
+                                                                  f"سيستمر البوت في فحص السوق ولكن لن يفتح صفقات جديدة حتى يتم توفير رصيد كافٍ.")
+                 bot_data.settings['sent_insufficient_funds_warning'] = True
+                 save_settings()
              return False
         
+        # Reset the flag if funds are sufficient
+        if settings.get('sent_insufficient_funds_warning'):
+            bot_data.settings['sent_insufficient_funds_warning'] = False
+            save_settings()
+
         base_amount = trade_size / signal['entry_price']
         formatted_amount = exchange.amount_to_precision(signal['symbol'], base_amount)
         buy_order = await exchange.create_market_buy_order(signal['symbol'], formatted_amount)
-        if await log_pending_trade_to_db(signal, buy_order):
-            await safe_send_message(bot_data.application.bot, f"🚀 تم إرسال أمر شراء لـ `{signal['symbol']}`.");
-            # Subscribe to the symbol after a successful trade
-            if bot_data.public_ws:
-                await bot_data.public_ws.subscribe([signal['symbol']])
-            return True
-        else:
-            await exchange.cancel_order(buy_order['id'], signal['symbol']); return False
+        
+        # Call the activation function immediately after placing the order
+        await activate_trade_binance(buy_order['id'], signal['symbol'])
+        
+        # The trade is now active and logged, so we can return True
+        return True
+
     except ccxt.InsufficientFunds as e:
-        logger.error(f"REAL TRADE FAILED {signal['symbol']}: {e}"); await safe_send_message(bot_data.application.bot, f"⚠️ **رصيد غير كافٍ!**");
-        bot_data.trading_enabled = False # إيقاف البوت لتجنب تكرار الرسالة
+        if not settings.get('sent_insufficient_funds_warning'):
+            await safe_send_message(bot_data.application.bot, f"🚨 **فشل الشراء: رصيد غير كافٍ**\n"
+                                                              f"لا يمكن فتح صفقة جديدة لأن رصيدك من USDT (`${usdt_balance:,.2f}`) أقل من حجم الصفقة المحدَّد (`${trade_size:,.2f}`).\n"
+                                                              f"سيستمر البوت في فحص السوق ولكن لن يفتح صفقات جديدة حتى يتم توفير رصيد كافٍ.")
+            bot_data.settings['sent_insufficient_funds_warning'] = True
+            save_settings()
+        logger.error(f"REAL TRADE FAILED {signal['symbol']}: {e}", exc_info=True)
         return False
-    except Exception as e: logger.error(f"REAL TRADE FAILED {signal['symbol']}: {e}", exc_info=True); return False
+    except Exception as e:
+        logger.error(f"REAL TRADE FAILED {signal['symbol']}: {e}", exc_info=True); return False
 
 async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
     async with scan_lock:
@@ -702,6 +827,7 @@ class BinanceWebSocketManager:
         self.subscriptions = set()
         self.ticker_queue = asyncio.Queue()
         self.is_connected = False
+        self.reconnect_task = None
 
     async def _handle_message(self, message):
         data = json.loads(message)
@@ -747,14 +873,14 @@ class BinanceWebSocketManager:
             self.subscriptions.update(new_symbols)
             logger.info(f"Subscribed to new symbols: {new_symbols}")
             # Force a reconnect to update the stream list
-            if self.ws:
+            if self.ws and not self.ws.closed:
                 await self.ws.close()
     
     async def unsubscribe(self, symbols):
         for s in symbols:
             self.subscriptions.discard(s)
         logger.info(f"Unsubscribed from symbols: {symbols}")
-        if self.ws:
+        if self.ws and not self.ws.closed:
             await self.ws.close()
 
     async def _process_queue(self):
@@ -971,8 +1097,15 @@ async def daily_report_command(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def toggle_kill_switch(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query; bot_data.trading_enabled = not bot_data.trading_enabled
-    if bot_data.trading_enabled: await query.answer("✅ تم استئناف التداول الطبيعي."); await safe_send_message(context.bot, "✅ **تم استئناف التداول الطبيعي.**")
-    else: await query.answer("🚨 تم تفعيل مفتاح الإيقاف!", show_alert=True); await safe_send_message(context.bot, "🚨 **تحذير: تم تفعيل مفتاح الإيقاف!**")
+    if bot_data.trading_enabled: 
+        await query.answer("✅ تم استئناف التداول الطبيعي."); 
+        await safe_send_message(context.bot, "✅ **تم استئناف التداول الطبيعي.**")
+        if bot_data.settings.get('sent_insufficient_funds_warning'):
+            bot_data.settings['sent_insufficient_funds_warning'] = False
+            save_settings()
+    else: 
+        await query.answer("🚨 تم تفعيل مفتاح الإيقاف!", show_alert=True); 
+        await safe_send_message(context.bot, "🚨 **تحذير: تم تفعيل مفتاح الإيقاف!**")
     await show_dashboard_command(update, context)
 
 async def show_trades_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1505,7 +1638,8 @@ async def post_init(application: Application):
 
     job_queue = application.job_queue
     job_queue.run_repeating(perform_scan, interval=SCAN_INTERVAL_SECONDS, first=10, name="perform_scan")
-    # The supervisor job is now replaced by the WebSocket's _process_queue
+    # A dedicated job to check for pending orders
+    job_queue.run_repeating(check_pending_order_status, interval=60, first=30, name="pending_order_check")
     job_queue.run_daily(send_daily_report, time=dt_time(hour=23, minute=55, tzinfo=EGYPT_TZ), name='daily_report')
 
     logger.info(f"Jobs scheduled. Daily report at 23:55.")
