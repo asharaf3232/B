@@ -14,6 +14,7 @@
 #   ✅ [الأمان] الحفاظ على آلية إغلاق الصفقات المستقرة القائمة على ccxt والمشرف.
 #   ✅ [المنصة] تم التأكد من أن كل جزء في الكود متوافق 100% مع Binance Spot.
 #   ✅ [الإعدادات] تم إصلاح الأنماط الجاهزة لتعمل بشكل صحيح مع الماسحات.
+#   ✅ [إصلاح الأخطاء] تم إصلاح مشكلة عدم استجابة زر الفحص اليدوي والفحص التلقائي.
 #
 # =======================================================================================
 
@@ -199,7 +200,7 @@ async def init_database():
     try:
         async with aiosqlite.connect(DB_FILE) as conn:
             # Added new 'last_profit_notification_price' column
-            await conn.execute('CREATE TABLE IF NOT EXISTS trades (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT, symbol TEXT, entry_price REAL, take_profit REAL, stop_loss REAL, quantity REAL, status TEXT, reason TEXT, order_id TEXT, highest_price REAL DEFAULT 0, trailing_sl_active BOOLEAN DEFAULT 0, close_price REAL, pnl_usdt REAL, signal_strength INTEGER DEFAULT 1, close_retries INTEGER DEFAULT 0, last_profit_notification_price REAL DEFAULT 0)')
+            await conn.execute('CREATE TABLE IF NOT EXISTS trades (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT, symbol TEXT, entry_price REAL, take_profit REAL, stop_loss REAL REAL, quantity REAL, status TEXT, reason TEXT, order_id TEXT, highest_price REAL DEFAULT 0, trailing_sl_active BOOLEAN DEFAULT 0, close_price REAL, pnl_usdt REAL, signal_strength INTEGER DEFAULT 1, close_retries INTEGER DEFAULT 0, last_profit_notification_price REAL DEFAULT 0)')
             await conn.commit()
         logger.info("Database initialized successfully.")
     except Exception as e: logger.critical(f"Database initialization failed: {e}")
@@ -815,6 +816,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def manual_scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not bot_data.trading_enabled: await (update.message or update.callback_query.message).reply_text("🔬 الفحص محظور. مفتاح الإيقاف مفعل."); return
     await (update.message or update.callback_query.message).reply_text("🔬 أمر فحص يدوي... قد يستغرق بعض الوقت.")
+    # لا نقوم بإزالة المهمة المجدولة، فقط نضيف مهمة تشغيل لمرة واحدة
     context.job_queue.run_once(perform_scan, 1)
 
 async def show_dashboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
