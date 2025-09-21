@@ -450,6 +450,13 @@ async def worker_batch(queue, signals_list, errors_list):
                 continue
 
             orderbook = await exchange.fetch_order_book(symbol, limit=1)
+            
+            # --- إصلاح الخطأ: فحص ما إذا كان دفتر الأوامر فارغًا قبل محاولة الوصول إليه
+            if not orderbook['bids'] or not orderbook['asks']:
+                logger.warning(f"Skipping {symbol}: Order book is empty.")
+                queue.task_done()
+                continue
+
             best_bid, best_ask = orderbook['bids'][0][0], orderbook['asks'][0][0]
             if best_bid <= 0:
                 queue.task_done()
