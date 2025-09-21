@@ -694,18 +694,20 @@ async def activate_trade_binance(buy_order, signal):
     confidence_level_str = f"**🧠 مستوى الثقة:** `{trade_weight:.0%}` (تم تعديل الحجم)\n" if trade_weight != 1.0 else ""
     
     success_msg = (f"✅ **تم تأكيد الشراء | {symbol}**\n"
-                   f"**الاستراتيجية:** {reason_display_str}\n"
-                   f"**قوة الإشارة:** {strength_stars}\n"
+                   f"━━━━━━━━━━━━━━━━━━\n"
+                   f"**الاستراتيجية:** {reason_display_str} {strength_stars}\n"
                    f"{confidence_level_str}"
-                   f"🔸 **الصفقة رقم:** #{trade_id}\n"
-                   f"🔸 **سعر التنفيذ:** `${filled_price:,.4f}`\n"
-                   f"🔸 **الكمية:** {net_filled_quantity:,.4f} {symbol.split('/')[0]}\n"
-                   f"🔸 **التكلفة:** `${trade_cost:,.2f}`\n"
-                   f"🎯 **الهدف (TP):** `${signal['take_profit']:,.4f} ({tp_percent:+.2f}%)`\n"
-                   f"🛡️ **الوقف (SL):** `${signal['stop_loss']:,.4f} ({sl_percent:.2f}%)`\n"
-                   f"💰 **السيولة المتبقية (USDT):** `${usdt_remaining:,.2f}`\n"
-                   f"🔄 **إجمالي الصفقات النشطة:** `{active_trades_count}`\n"
-                   f"الحارس الأمين يراقب الصفقة الآن.")
+                   f"**تفاصيل الصفقة:**\n"
+                   f"  - **رقم:** `#{trade_id}`\n"
+                   f"  - **سعر التنفيذ:** `${filled_price:,.4f}`\n"
+                   f"  - **الكمية:** `{net_filled_quantity:,.4f}`\n"
+                   f"  - **التكلفة الإجمالية:** `${trade_cost:,.2f}`\n"
+                   f"**الأهداف:**\n"
+                   f"  - **الهدف (TP):** `${signal['take_profit']:,.4f}` `({tp_percent:+.2f}%)`\n"
+                   f"  - **الوقف (SL):** `${signal['stop_loss']:,.4f}` `({sl_percent:.2f}%)`\n"
+                   f"━━━━━━━━━━━━━━━━━━\n"
+                   f"💰 **السيولة المتبقية:** `${usdt_remaining:,.2f}`\n"
+                   f"🔄 **الصفقات النشطة:** `{active_trades_count}`")
     await safe_send_message(bot, success_msg)
 
 async def check_pending_order_status(context: ContextTypes.DEFAULT_TYPE):
@@ -731,7 +733,8 @@ async def initiate_real_trade(signal):
         if usdt_balance < trade_size:
             if not settings.get('sent_insufficient_funds_warning'):
                 await safe_send_message(bot_data.application.bot, f"🚨 **فشل الشراء: رصيد غير كافٍ**\n"
-                                                                  f"رصيدك (`${usdt_balance:,.2f}`) أقل من حجم الصفقة المطلوب (`${trade_size:,.2f}`).")
+                                                                  f"لا يمكن فتح صفقة جديدة لأن رصيدك من USDT (`${usdt_balance:,.2f}`) أقل من حجم الصفقة المحدَّد (`${trade_size:,.2f}`).\n"
+                                                                  f"سيستمر البوت في فحص السوق ولكن لن يفتح صفقات جديدة حتى يتم توفير رصيد كافٍ.")
                 bot_data.settings['sent_insufficient_funds_warning'] = True; save_settings()
             return False
         
@@ -747,7 +750,10 @@ async def initiate_real_trade(signal):
 
     except ccxt.InsufficientFunds as e:
         if not settings.get('sent_insufficient_funds_warning'):
-            await safe_send_message(bot_data.application.bot, f"🚨 **فشل الشراء: رصيد غير كافٍ**")
+            balance = await exchange.fetch_balance(); usdt_balance = balance.get('USDT', {}).get('free', 0.0)
+            await safe_send_message(bot_data.application.bot, f"🚨 **فشل الشراء: رصيد غير كافٍ**\n"
+                                                              f"لا يمكن فتح صفقة جديدة لأن رصيدك من USDT (`${usdt_balance:,.2f}`) أقل من حجم الصفقة المحدَّد (`${settings['real_trade_size_usdt']:.2f}`).\n"
+                                                              f"سيستمر البوت في فحص السوق ولكن لن يفتح صفقات جديدة حتى يتم توفير رصيد كافٍ.")
             bot_data.settings['sent_insufficient_funds_warning'] = True; save_settings()
         logger.error(f"REAL TRADE FAILED {signal['symbol']}: {e}", exc_info=True)
         return False
@@ -766,11 +772,26 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
         if settings.get('news_filter_enabled', True):
             mood_result_fundamental = await get_fundamental_market_mood()
             if mood_result_fundamental['mood'] in ["NEGATIVE", "DANGEROUS"]:
-                await safe_send_message(bot, f"🚨 **فحص السوق متوقف:** {mood_result_fundamental['reason']}"); return
+                bot_data.market_mood = mood_result_fundamental
+                await safe_send_message(bot, f"🚨 **تنبيه: فحص السوق تم إيقافه!**\n"
+                                           f"━━━━━━━━━━━━━━━━━━━━\n"
+                                           f"**السبب:** {mood_result_fundamental['reason']}\n"
+                                           f"**الإجراء:** تم تخطي الفحص لحماية رأس المال من تقلبات الأخبار والبيانات الاقتصادية الهامة.")
+                return
 
         mood_result = await get_market_mood()
+        bot_data.market_mood = mood_result
         if mood_result['mood'] in ["NEGATIVE", "DANGEROUS"]:
-            await safe_send_message(bot, f"🚨 **فحص السوق متوقف:** {mood_result['reason']}"); return
+            await safe_send_message(bot, f"🚨 **تنبيه: فحص السوق تم إيقافه!**\n"
+                                       f"━━━━━━━━━━━━━━━━━━━━\n"
+                                       f"**السبب الرئيسي:** {mood_result['reason']}\n"
+                                       f"**التفاصيل:** تم تخطي الفحص التلقائي بسبب عدم استيفاء شروط الدخول الصارمة.\n"
+                                       f"💡 **ماذا يعني هذا؟**\n"
+                                       f"يُشير ذلك إلى أن السوق في حالة من عدم اليقين أو الاتجاه الهابط، مما يزيد من مخاطر التداول. يفضل البوت حماية رأس المال على الدخول في صفقات عالية المخاطر.\n"
+                                       f"**حالة مؤشرات السوق:**\n"
+                                       f"  - **اتجاه BTC:** {mood_result.get('btc_mood', 'N/A')}\n"
+                                       f"  - **مزاج السوق:** {bot_data.market_mood.get('reason', 'N/A')}")
+            return
 
         async with aiosqlite.connect(DB_FILE) as conn:
             active_trades_count = (await (await conn.execute("SELECT COUNT(*) FROM trades WHERE status = 'active'")).fetchone())[0]
@@ -803,9 +824,13 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
 
         scan_duration = time.time() - scan_start_time
         bot_data.last_scan_info = {"start_time": datetime.fromtimestamp(scan_start_time, EGYPT_TZ).strftime('%Y-%m-%d %H:%M:%S'), "duration_seconds": int(scan_duration), "checked_symbols": len(top_markets), "analysis_errors": len(analysis_errors)}
-        await safe_send_message(bot, f"✅ **فحص السوق اكتمل**\n"
-                                   f"**المدة:** {int(scan_duration)} ث | **العملات:** {len(top_markets)}\n"
-                                   f"**إشارات:** {len(signals_found)} | **صفقات مفتوحة:** {trades_opened_count}")
+        await safe_send_message(bot, f"✅ **فحص السوق اكتمل بنجاح**\n"
+                                   f"━━━━━━━━━━━━━━━━━━\n"
+                                   f"**المدة:** {int(scan_duration)} ثانية | **العملات المفحوصة:** {len(top_markets)}\n"
+                                   f"**النتائج:**\n"
+                                   f"  - **إشارات جديدة:** {len(signals_found)}\n"
+                                   f"  - **صفقات تم فتحها:** {trades_opened_count} صفقة\n"
+                                   f"  - **مشكلات تحليل:** {len(analysis_errors)} عملة")
 
 class BinanceWebSocketManager:
     def __init__(self):
@@ -876,7 +901,7 @@ async def check_and_close_trade(trade, current_price, context):
                 new_sl = trade['entry_price']
                 async with aiosqlite.connect(DB_FILE) as conn:
                     await conn.execute("UPDATE trades SET trailing_sl_active = 1, stop_loss = ? WHERE id = ?", (new_sl, trade['id'])); await conn.commit()
-                await safe_send_message(context.bot, f"**🚀 تأمين الأرباح! | #{trade['id']} {trade['symbol']}**\nتم رفع الوقف إلى: `${new_sl}`")
+                await safe_send_message(context.bot, f"**🚀 تأمين الأرباح! | #{trade['id']} {trade['symbol']}**\nتم رفع وقف الخسارة إلى نقطة الدخول: `${new_sl}`")
             
             if trade['trailing_sl_active']:
                 new_sl = highest_price * (1 - settings['trailing_sl_callback_percent'] / 100)
@@ -925,6 +950,20 @@ async def close_trade(trade, reason, close_price, context):
             pnl_percent = (close_price_final / trade['entry_price'] - 1) * 100 if trade['entry_price'] > 0 else 0
             emoji = "✅" if pnl > 0 else "🛑"
 
+            # Enhanced trade closure details
+            start_dt = datetime.fromisoformat(trade['timestamp']); end_dt = datetime.now(EGYPT_TZ)
+            duration = end_dt - start_dt
+            days, rem = divmod(duration.total_seconds(), 86400); hours, rem = divmod(rem, 3600); minutes, _ = divmod(rem, 60)
+            duration_str = f"{int(days)}d {int(hours)}h {int(minutes)}m" if days > 0 else f"{int(hours)}h {int(minutes)}m"
+            
+            highest_price_val = max(trade.get('highest_price', 0), close_price_final)
+            highest_pnl_percent = ((highest_price_val - trade['entry_price']) / trade['entry_price'] * 100) if trade['entry_price'] > 0 else 0
+            exit_efficiency_percent = 0
+            if highest_price_val > trade['entry_price']:
+                highest_pnl_usdt = (highest_price_val - trade['entry_price']) * trade['quantity']
+                if highest_pnl_usdt > 0:
+                    exit_efficiency_percent = (pnl / highest_pnl_usdt) * 100
+
             async with aiosqlite.connect(DB_FILE) as conn:
                 await conn.execute("UPDATE trades SET status = ?, close_price = ?, pnl_usdt = ? WHERE id = ?", (reason, close_price_final, pnl, trade['id'])); await conn.commit()
             
@@ -932,7 +971,12 @@ async def close_trade(trade, reason, close_price, context):
 
             msg = (f"{emoji} **تم إغلاق الصفقة | #{trade_id} {symbol}**\n"
                    f"**السبب:** {reason}\n"
-                   f"**الربح/الخسارة:** `${pnl:,.2f}` ({pnl_percent:+.2f}%)")
+                   f"━━━━━━━━━━━━━━━━━━\n"
+                   f"**إحصائيات الأداء**\n"
+                   f"**الربح/الخسارة:** `${pnl:,.2f}` ({pnl_percent:+.2f}%)\n"
+                   f"**أعلى ربح مؤقت:** {highest_pnl_percent:+.2f}%\n"
+                   f"**كفاءة الخروج:** {exit_efficiency_percent:.2f}%\n"
+                   f"**مدة الصفقة:** {duration_str}")
             await safe_send_message(bot, msg); return
         except Exception as e:
             logger.warning(f"Failed to close trade #{trade_id}. Retrying... ({i + 1}/{max_retries})", exc_info=True)
@@ -1621,3 +1665,4 @@ def main():
     
 if __name__ == '__main__':
     main()
+
