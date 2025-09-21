@@ -13,6 +13,7 @@
 #   ✅ [الميزات] تمت إضافة كل الماسحات والفلاتر المتقدمة.
 #   ✅ [الأمان] الحفاظ على آلية إغلاق الصفقات المستقرة القائمة على ccxt والمشرف.
 #   ✅ [المنصة] تم التأكد من أن كل جزء في الكود متوافق 100% مع Binance Spot.
+#   ✅ [الإعدادات] تم إصلاح الأنماط الجاهزة لتعمل بشكل صحيح مع الماسحات.
 #
 # =======================================================================================
 
@@ -1271,7 +1272,10 @@ async def handle_preset_set(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     preset_key = query.data.replace("preset_set_", "")
     if preset_settings := SETTINGS_PRESETS.get(preset_key):
+        # حفظ قائمة الماسحات النشطة قبل تطبيق النمط الجديد
+        current_scanners = bot_data.settings.get('active_scanners', [])
         bot_data.settings = copy.deepcopy(preset_settings)
+        bot_data.settings['active_scanners'] = current_scanners # استعادة قائمة الماسحات
         determine_active_preset()
         save_settings()
         await query.answer(f"✅ تم تفعيل النمط: {PRESET_NAMES_AR.get(preset_key, preset_key)}", show_alert=True)
