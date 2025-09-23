@@ -1,20 +1,18 @@
 # -*- coding: utf-8 -*-
 # =======================================================================================
-# --- 🚀 بوت التداول النهائي V7 (النسخة النهائية المدمجة) 🚀 ---
+# --- 🚀 بوت التداول V8 (النسخة البلاتينية النهائية) 🚀 ---
 # =======================================================================================
 #
-# هذا الإصدار هو الدمج النهائي لأفضل ما في الإصدارين V5 و V6.
-# - يمتلك محرك التداول المحصن والآمن من V6 (مع وظيفة المشرف وحالة pending).
-# - يمتلك واجهة المستخدم الكاملة والرسائل التفصيلية والتقارير الغنية من V5.
+# هذا الإصدار هو الترقية النهائية التي تدمج كل الميزات من جميع النسخ السابقة.
 #
-# --- سجل التغييرات للنسخة النهائية V7 ---
-#   ✅ [الدمج] **المحرك الأساسي:** استخدام آلية فتح الصفقات 'pending' ووظيفة 'المشرف'
-#         من V6 لضمان أقصى درجات الموثوقية ومنع ضياع الصفقات.
-#   ✅ [الدمج] **واجهة المستخدم:** استعادة جميع قوائم الإعدادات التفصيلية (خاصةً قائمة
-#         المعايير المتقدمة الكاملة) من V5.
-#   ✅ [الدمج] **الرسائل والتقارير:** استعادة جميع رسائل المستخدم والتقارير (اليومي،
-#         التشخيصي، المحفظة، إلخ) لتكون غنية بالمعلومات ومفصلة كما في V5.
-#   ✅ [النتيجة] نسخة متكاملة تجمع بين قوة المحرك وجمال الواجهة.
+# --- سجل التغييرات للنسخة البلاتينية V8 ---
+#   ✅ [الإضافة النهائية] **فلتر الأخبار الاقتصادية:** تم دمج فلتر Alpha Vantage
+#         للأحداث الاقتصادية الهامة. سيقوم البوت بإيقاف التداول تلقائياً في
+#         الأيام التي تحتوي على أخبار عالية التأثير لحماية رأس المال.
+#   ✅ [الاكتمال] **المحرك المحصن:** يحتوي على آلية التداول الآمنة (المشرف + pending) من V6.
+#   ✅ [الاكتمال] **الواجهة الكاملة:** يحتوي على جميع القوائم والرسائل والتقارير المفصلة من V5.
+#   ✅ [الاكتمال] **الذكاء التكيفي:** يحتوي على كامل ميزات العقل التكيفي من V5.
+#   ✅ [النتيجة] النسخة الأكثر اكتمالاً وأماناً وقوة.
 #
 # =======================================================================================
 
@@ -72,10 +70,13 @@ TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 BINANCE_API_KEY = os.getenv('BINANCE_API_KEY')
 BINANCE_API_SECRET = os.getenv('BINANCE_API_SECRET')
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
+# [إضافة من V5] مفتاح Alpha Vantage للأخبار الاقتصادية
+ALPHA_VANTAGE_API_KEY = os.getenv('ALPHA_VANTAGE_API_KEY', 'YOUR_AV_KEY_HERE')
+
 
 # --- إعدادات البوت ---
-DB_FILE = 'trading_bot_v7.db'
-SETTINGS_FILE = 'trading_bot_v7_settings.json'
+DB_FILE = 'trading_bot_v8.db'
+SETTINGS_FILE = 'trading_bot_v8_settings.json'
 TIMEFRAME = '15m'
 SCAN_INTERVAL_SECONDS = 900
 SUPERVISOR_INTERVAL_SECONDS = 120 # وظيفة المشرف تعمل كل دقيقتين
@@ -189,7 +190,6 @@ def save_settings():
 async def init_database():
     try:
         async with aiosqlite.connect(DB_FILE) as conn:
-            # تم إضافة عمود status ليدعم الآن 'pending'
             await conn.execute('CREATE TABLE IF NOT EXISTS trades (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT, symbol TEXT, entry_price REAL, take_profit REAL, stop_loss REAL, quantity REAL, status TEXT, reason TEXT, order_id TEXT, highest_price REAL DEFAULT 0, trailing_sl_active BOOLEAN DEFAULT 0, close_price REAL, pnl_usdt REAL, signal_strength INTEGER DEFAULT 1, close_retries INTEGER DEFAULT 0, last_profit_notification_price REAL DEFAULT 0, trade_weight REAL DEFAULT 1.0)')
             cursor = await conn.execute("PRAGMA table_info(trades)")
             columns = [row[1] for row in await cursor.fetchall()]
@@ -198,7 +198,7 @@ async def init_database():
             if 'last_profit_notification_price' not in columns: await conn.execute("ALTER TABLE trades ADD COLUMN last_profit_notification_price REAL DEFAULT 0")
             if 'trade_weight' not in columns: await conn.execute("ALTER TABLE trades ADD COLUMN trade_weight REAL DEFAULT 1.0")
             await conn.commit()
-        logger.info("Final Version Database initialized successfully.")
+        logger.info("Platinum Version Database initialized successfully.")
     except Exception as e: logger.critical(f"Database initialization failed: {e}")
 
 async def safe_send_message(bot, text, **kwargs):
@@ -274,6 +274,24 @@ async def translate_text_gemini(text_list):
             return translated_text.strip().split('\n'), True
     except Exception as e: logger.error(f"Gemini translation failed: {e}"); return text_list, False
 
+# [إضافة من V5] دالة فلتر الأخبار الاقتصادية الهامة
+def get_alpha_vantage_economic_events():
+    if not ALPHA_VANTAGE_API_KEY or ALPHA_VANTAGE_API_KEY == 'YOUR_AV_KEY_HERE': return []
+    today_str = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+    params = {'function': 'ECONOMIC_CALENDAR', 'horizon': '3month', 'apikey': ALPHA_VANTAGE_API_KEY}
+    try:
+        response = httpx.get('https://www.alphavantage.co/query', params=params, timeout=20)
+        response.raise_for_status(); data_str = response.text
+        if "premium" in data_str.lower(): return []
+        lines = data_str.strip().split('\r\n')
+        if len(lines) < 2: return []
+        header = [h.strip() for h in lines[0].split(',')]
+        events = [dict(zip(header, [v.strip() for v in line.split(',')])) for line in lines[1:]]
+        high_impact_events = [e.get('event', 'Unknown Event') for e in events if e.get('releaseDate', '') == today_str and e.get('impact', '').lower() == 'high' and e.get('country', '') in ['USD', 'EUR']]
+        if high_impact_events: logger.warning(f"High-impact events today: {high_impact_events}")
+        return high_impact_events
+    except httpx.RequestError as e: logger.error(f"Failed to fetch economic calendar: {e}"); return None
+
 def get_latest_crypto_news(limit=15):
     urls = ["https://cointelegraph.com/rss", "https://www.coindesk.com/arc/outboundfeeds/rss/"]
     headlines = [entry.title for url in urls for entry in feedparser.parse(url).entries[:7]]
@@ -287,9 +305,13 @@ def analyze_sentiment_of_headlines(headlines):
     else: mood = "محايدة"
     return mood, score
 
+# [تحديث] دمج فلتر Alpha Vantage في تحليل مزاج السوق
 async def get_fundamental_market_mood():
     s = bot_data.settings
     if not s.get('news_filter_enabled', True): return {"mood": "POSITIVE", "reason": "فلتر الأخبار معطل"}
+    high_impact_events = await asyncio.to_thread(get_alpha_vantage_economic_events)
+    if high_impact_events is None: return {"mood": "DANGEROUS", "reason": "فشل جلب البيانات الاقتصادية"}
+    if high_impact_events: return {"mood": "DANGEROUS", "reason": f"أحداث هامة اليوم: {', '.join(high_impact_events)}"}
     latest_headlines = await asyncio.to_thread(get_latest_crypto_news)
     sentiment, score = analyze_sentiment_of_headlines(latest_headlines)
     logger.info(f"Market sentiment score: {score:.2f} ({sentiment})")
@@ -516,7 +538,6 @@ async def initiate_real_trade(signal):
         formatted_amount = exchange.amount_to_precision(signal['symbol'], base_amount)
         buy_order = await exchange.create_market_buy_order(signal['symbol'], formatted_amount)
         
-        # التغيير الجوهري: تسجيل الصفقة كـ 'pending' بدلاً من تفعيلها فوراً
         async with aiosqlite.connect(DB_FILE) as conn:
             await conn.execute("INSERT INTO trades (timestamp, symbol, reason, order_id, status, entry_price, take_profit, stop_loss, signal_strength, trade_weight) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                                (datetime.now(EGYPT_TZ).isoformat(), signal['symbol'], signal['reason'], buy_order['id'], 'pending', signal['entry_price'], signal['take_profit'], signal['stop_loss'], signal.get('strength', 1), signal.get('weight', 1.0)))
@@ -579,7 +600,6 @@ async def activate_trade_binance(order_details, original_signal_data):
     trade_weight = original_signal_data.get('weight', 1.0)
     confidence_level_str = f"**🧠 مستوى الثقة:** `{trade_weight:.0%}` (تم تعديل الحجم)\n" if trade_weight != 1.0 else ""
     
-    # [مدمج من V5] استخدام الرسالة التفصيلية
     success_msg = (f"✅ **تم تأكيد الشراء | {symbol}**\n"
                    f"━━━━━━━━━━━━━━━━━━\n"
                    f"**الاستراتيجية:** {reason_display_str} {strength_stars}\n"
@@ -621,7 +641,7 @@ async def the_supervisor_job(context: ContextTypes.DEFAULT_TYPE):
                 elif order_status['status'] == 'canceled':
                     logger.warning(f"🕵️ Supervisor: Order {order_id} was canceled. Marking trade #{trade['id']} as failed.")
                     await conn.execute("UPDATE trades SET status = 'failed', reason = 'Canceled by exchange' WHERE id = ?", (trade['id'],))
-                else: # إذا كان لا يزال 'open'، نحاول إلغاءه
+                else: 
                     logger.warning(f"🕵️ Supervisor: Order {order_id} is stuck 'open'. Cancelling and marking as failed.")
                     await bot_data.exchange.cancel_order(order_id, symbol)
                     await conn.execute("UPDATE trades SET status = 'failed', reason = 'Canceled by supervisor' WHERE id = ?", (trade['id'],))
@@ -651,7 +671,6 @@ async def close_trade(trade, reason, close_price, context):
             if pnl > 0 and reason == "فاشلة (SL)": reason = "تم تأمين الربح (TSL)"
             emoji = "✅" if pnl > 0 else "🛑"
 
-            # [مدمج من V5] استخدام تفاصيل الإغلاق الكاملة
             start_dt = datetime.fromisoformat(trade['timestamp']); end_dt = datetime.now(EGYPT_TZ)
             duration = end_dt - start_dt
             days, rem = divmod(duration.total_seconds(), 86400); hours, rem = divmod(rem, 3600); minutes, _ = divmod(rem, 60)
@@ -667,7 +686,6 @@ async def close_trade(trade, reason, close_price, context):
                 await conn.execute("UPDATE trades SET status = ?, close_price = ?, pnl_usdt = ? WHERE id = ?", (reason, close_price_final, pnl, trade['id'])); await conn.commit()
             if bot_data.public_ws: await bot_data.public_ws.unsubscribe([symbol])
             
-            # [مدمج من V5] استخدام رسالة الإغلاق التفصيلية
             msg = (f"{emoji} **تم إغلاق الصفقة | #{trade_id} {symbol}**\n"
                    f"**السبب:** {reason}\n"
                    f"━━━━━━━━━━━━━━━━━━\n"
@@ -694,31 +712,30 @@ async def close_trade(trade, reason, close_price, context):
 async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
     async with scan_lock:
         if not bot_data.trading_enabled: logger.info("Scan skipped: Kill Switch is active."); return
-        scan_start_time = time.time(); logger.info("--- Starting new Final Version scan... ---")
-        settings, bot = context.bot, context.bot
-        if settings.get('news_filter_enabled', True):
-            mood_result_fundamental = await get_fundamental_market_mood()
-            if mood_result_fundamental['mood'] in ["NEGATIVE", "DANGEROUS"]:
-                bot_data.market_mood = mood_result_fundamental
-                # [مدمج من V5] رسالة مفصلة
-                await safe_send_message(bot, f"🚨 **تنبيه: فحص السوق تم إيقافه!**\n"
-                                           f"━━━━━━━━━━━━━━━━━━━━\n"
-                                           f"**السبب:** {mood_result_fundamental['reason']}\n"
-                                           f"**الإجراء:** تم تخطي الفحص لحماية رأس المال من تقلبات الأخبار والبيانات الاقتصادية الهامة.")
-                return
+        scan_start_time = time.time(); logger.info("--- Starting new Platinum Version scan... ---")
+        settings, bot = bot_data.settings, context.bot
+        
+        # [تحديث] استخدام دالة تحليل مزاج السوق الكاملة
+        mood_result_fundamental = await get_fundamental_market_mood()
+        if mood_result_fundamental['mood'] in ["NEGATIVE", "DANGEROUS"]:
+            bot_data.market_mood = mood_result_fundamental
+            await safe_send_message(bot, f"🚨 **تنبيه: فحص السوق تم إيقافه!**\n"
+                                       f"━━━━━━━━━━━━━━━━━━━━\n"
+                                       f"**السبب:** {mood_result_fundamental['reason']}\n"
+                                       f"**الإجراء:** تم تخطي الفحص لحماية رأس المال.")
+            return
+
         mood_result = await get_market_mood(); bot_data.market_mood = mood_result
         if mood_result['mood'] in ["NEGATIVE", "DANGEROUS"]:
-            # [مدمج من V5] رسالة مفصلة
             await safe_send_message(bot, f"🚨 **تنبيه: فحص السوق تم إيقافه!**\n"
                                        f"━━━━━━━━━━━━━━━━━━━━\n"
                                        f"**السبب الرئيسي:** {mood_result['reason']}\n"
                                        f"**التفاصيل:** تم تخطي الفحص التلقائي بسبب عدم استيفاء شروط الدخول الصارمة.\n"
-                                       f"💡 **ماذا يعني هذا؟**\n"
-                                       f"يُشير ذلك إلى أن السوق في حالة من عدم اليقين أو الاتجاه الهابط، مما يزيد من مخاطر التداول. يفضل البوت حماية رأس المال على الدخول في صفقات عالية المخاطر.\n"
                                        f"**حالة مؤشرات السوق:**\n"
                                        f"  - **اتجاه BTC:** {mood_result.get('btc_mood', 'N/A')}\n"
                                        f"  - **مزاج السوق:** {bot_data.market_mood.get('reason', 'N/A')}")
             return
+            
         async with aiosqlite.connect(DB_FILE) as conn:
             active_trades_count = (await (await conn.execute("SELECT COUNT(*) FROM trades WHERE status = 'active' OR status = 'pending'")).fetchone())[0]
         if active_trades_count >= settings['max_concurrent_trades']: logger.info(f"Scan skipped: Max trades ({active_trades_count}) reached."); return
@@ -737,7 +754,6 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
                 await asyncio.sleep(2)
         scan_duration = time.time() - scan_start_time
         bot_data.last_scan_info = {"start_time": datetime.fromtimestamp(scan_start_time, EGYPT_TZ).strftime('%Y-%m-%d %H:%M:%S'), "duration_seconds": int(scan_duration), "checked_symbols": len(top_markets), "analysis_errors": len(analysis_errors)}
-        # [مدمج من V5] رسالة مفصلة
         await safe_send_message(bot, f"✅ **فحص السوق اكتمل بنجاح**\n"
                                    f"━━━━━━━━━━━━━━━━━━\n"
                                    f"**المدة:** {int(scan_duration)} ثانية | **العملات المفحوصة:** {len(top_markets)}\n"
@@ -821,7 +837,7 @@ async def check_incremental_profit(trade, current_price, context):
 # --- واجهة تليجرام المتقدمة (مدمجة من V5) ---
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [["Dashboard 🖥️"], ["الإعدادات ⚙️"]]
-    await update.message.reply_text("أهلاً بك في **بوت التداول النهائي V7 (النسخة النهائية المدمجة)**", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True), parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text("أهلاً بك في **بوت التداول V8 (النسخة البلاتينية)**", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True), parse_mode=ParseMode.MARKDOWN)
 
 async def manual_scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not bot_data.trading_enabled: await (update.message or update.callback_query.message).reply_text("🔬 الفحص محظور. مفتاح الإيقاف مفعل."); return
@@ -1002,7 +1018,7 @@ async def show_strategy_report_command(update: Update, context: ContextTypes.DEF
     stats = defaultdict(lambda: {'wins': 0, 'losses': 0})
     for reason, status in trades:
         if not reason: continue
-        clean_reason = reason.split(' (')[0] 
+        clean_reason = reason.split(' (')[0]
         reasons = clean_reason.split(' + ')
         for r in reasons:
             if 'ناجحة' in status or 'تأمين' in status: stats[r]['wins'] += 1
@@ -1378,7 +1394,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
 
 # --- دالة التشغيل الرئيسية ---
 async def post_init(application: Application):
-    logger.info("Performing post-initialization setup for Final Version Bot...")
+    logger.info("Performing post-initialization setup for Platinum Version Bot...")
     if not all([TELEGRAM_BOT_TOKEN, BINANCE_API_KEY, BINANCE_API_SECRET]):
         logger.critical("FATAL: Missing environment variables."); return
     if NLTK_AVAILABLE:
@@ -1401,15 +1417,14 @@ async def post_init(application: Application):
         if active_symbols: await bot_data.public_ws.subscribe(active_symbols)
     jq = application.job_queue
     jq.run_repeating(perform_scan, interval=SCAN_INTERVAL_SECONDS, first=10, name="perform_scan")
-    # --- [إضافة حاسمة] جدولة وظيفة المشرف ---
     jq.run_repeating(the_supervisor_job, interval=SUPERVISOR_INTERVAL_SECONDS, first=30, name="the_supervisor_job")
     jq.run_daily(send_daily_report, time=dt_time(hour=23, minute=55, tzinfo=EGYPT_TZ), name='daily_report')
     jq.run_repeating(update_strategy_performance, interval=3600, first=60, name="update_strategy_performance")
     jq.run_repeating(propose_strategy_changes, interval=3600, first=120, name="propose_strategy_changes")
     logger.info(f"Jobs scheduled. Supervisor runs every {SUPERVISOR_INTERVAL_SECONDS}s.")
-    try: await application.bot.send_message(TELEGRAM_CHAT_ID, "*🤖 بوت التداول V7 (النسخة النهائية) - بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
+    try: await application.bot.send_message(TELEGRAM_CHAT_ID, "*🤖 بوت التداول V8 (النسخة البلاتينية) - بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
     except Forbidden: logger.critical(f"FATAL: Bot not authorized for chat ID {TELEGRAM_CHAT_ID}."); return
-    logger.info("--- Binance Final Version Bot V7 is now fully operational ---")
+    logger.info("--- Binance Platinum Version Bot V8 is now fully operational ---")
 
 async def post_shutdown(application: Application):
     if bot_data.exchange: await bot_data.exchange.close()
@@ -1418,7 +1433,7 @@ async def post_shutdown(application: Application):
     logger.info("Bot has shut down.")
 
 def main():
-    logger.info("Starting Binance Final Version Bot V7...")
+    logger.info("Starting Binance Platinum Version Bot V8...")
     app_builder = Application.builder().token(TELEGRAM_BOT_TOKEN)
     app_builder.post_init(post_init).post_shutdown(post_shutdown)
     application = app_builder.build()
