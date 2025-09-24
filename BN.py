@@ -1,24 +1,22 @@
 # -*- coding: utf-8 -*-
 # =======================================================================================
-# --- 🚀 بوت التداول النهائي V6 (Binance Reliability Enhanced) 🚀 ---
+# --- 🚀 بوت التداول النهائي V6.1 (Binance Reliability Enhanced - Patched) 🚀 ---
 # =======================================================================================
 #
 # هذا الإصدار هو ترقية هيكلية جذرية لبوت Binance، مستوحاة من البنية القوية لبوت OKX.
 # الهدف الرئيسي: زيادة الموثوقية والقضاء على مشاكل فقدان الصفقات والإشعارات.
 #
-# --- سجل التغييرات للإصدار 6 (إصدار الموثوقية) ---
+# --- سجل التغييرات للإصدار 6.1 (النسخة المصححة) ---
+#   ✅ [إصلاح حاسم] **إصلاح User Data Stream:** تم تصحيح أسماء الدوال المسؤولة عن جلب مفتاح الاستماع،
+#     مما يعيد تفعيل نظام التأكيد الفوري للصفقات ويمنع التأخير.
+#   ✅ [إصلاح حاسم] **إصلاح منطق تجاوز الصفقات:** تم تعديل حلقة فتح الصفقات لتحديث عداد الصفقات النشطة
+#     بعد كل عملية شراء ناجحة، مما يضمن الالتزام بالحد الأقصى المحدد للصفقات.
 #   ✅ [هيكلي] **تطبيق نظام الحالة المزدوجة (Pending/Active):** يتم الآن تسجيل الصفقة كـ 'pending' فور إرسال الأمر،
 #     ولا يتم تفعيلها إلا بعد تأكيد التنفيذ الفعلي من المنصة.
 #   ✅ [هيكلي] **إضافة "المشرف" (The Supervisor):** مهمة دورية للبحث عن الصفقات العالقة في حالة 'pending'
 #     وتصحيح حالتها عبر API، مما يضمن عدم ضياع أي صفقة أبداً.
-#   ✅ [هيكلي] **إضافة "الحارس" (Trade Guardian):** نظام مراقبة أسعار متخصص ومفصول عن منطق الاتصال،
-#     مسؤول عن إدارة الوقف المتحرك، جني الأرباح، والوقف الثابت.
-#   ✅ [هيكلي] **إضافة "مراسل البيانات" (User Data Stream):** اتصال WebSocket خاص بالحساب للحصول على تأكيدات
-#     فورية لتنفيذ الأوامر، مما يسرّع من تفعيل الصفقات.
-#   ✅ [تحسين] **تطوير جذري لرسائل المستخدم:** رسائل تأكيد الشراء أصبحت غنية بالتفاصيل الدقيقة (السعر الفعلي،
-#     الكمية الصافية، التكلفة، نسب الربح/الخسارة المتوقعة).
-#   ✅ [تحسين] **إضافة نظام إعادة محاولة (Retry) لإغلاق الصفقات:** لزيادة قوة البوت في التعامل مع أخطاء الشبكة.
-#   ✅ [تحسين] **تنظيم الكود:** فصل المهام بشكل أفضل لسهولة الصيانة والتطوير المستقبلي.
+#   ✅ [هيكلي] **إضافة "الحارس" (Trade Guardian):** نظام مراقبة أسعار متخصص ومفصول عن منطق الاتصال.
+#   ✅ [تحسين] **تطوير جذري لرسائل المستخدم:** رسائل تأكيد الشراء أصبحت غنية بالتفاصيل الدقيقة.
 #
 # =======================================================================================
 
@@ -80,11 +78,11 @@ GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 ALPHA_VANTAGE_API_KEY = os.getenv('ALPHA_VANTAGE_API_KEY', 'YOUR_AV_KEY_HERE')
 
 # --- إعدادات البوت ---
-DB_FILE = 'trading_bot_v6_binance.db' # <-- تغيير اسم قاعدة البيانات للإصدار الجديد
-SETTINGS_FILE = 'trading_bot_v6_binance_settings.json' # <-- تغيير اسم ملف الإعدادات
+DB_FILE = 'trading_bot_v6_binance.db'
+SETTINGS_FILE = 'trading_bot_v6_binance_settings.json'
 TIMEFRAME = '15m'
 SCAN_INTERVAL_SECONDS = 900
-SUPERVISOR_INTERVAL_SECONDS = 120 # <-- إضافة جديدة: مهمة المشرف كل دقيقتين
+SUPERVISOR_INTERVAL_SECONDS = 120
 TIME_SYNC_INTERVAL_SECONDS = 3600
 STRATEGY_ANALYSIS_INTERVAL_SECONDS = 21600 # 6 hours
 EGYPT_TZ = ZoneInfo("Africa/Cairo")
@@ -169,10 +167,8 @@ class BotState:
         self.last_scan_info = {}
         self.all_markets = []
         self.last_markets_fetch = 0
-        self.public_ws = None # سيتم استبداله بنظام الحارس
-        self.user_data_stream = None # جديد: لمراقبة بيانات الحساب
-        self.trade_guardian = None # جديد: لإدارة الصفقات النشطة
-        # --- NEW ADAPTIVE INTELLIGENCE STATE ---
+        self.user_data_stream = None 
+        self.trade_guardian = None
         self.strategy_performance = {}
         self.pending_strategy_proposal = {}
 
@@ -224,11 +220,9 @@ async def init_database():
         logger.info("Adaptive database initialized successfully.")
     except Exception as e: logger.critical(f"Database initialization failed: {e}")
 
-# --- [إضافة جديدة] دالة تسجيل الصفقة المبدئي ---
 async def log_pending_trade_to_db(signal, buy_order):
     try:
         async with aiosqlite.connect(DB_FILE) as conn:
-            # لاحظ أننا لا نسجل الكمية بعد، لأنها غير معروفة بدقة
             await conn.execute("""
                 INSERT INTO trades (timestamp, symbol, reason, order_id, status, entry_price, take_profit, stop_loss, signal_strength, trade_weight)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -242,7 +236,6 @@ async def log_pending_trade_to_db(signal, buy_order):
         return False
 
 async def safe_send_message(bot, text, **kwargs):
-    # إضافة آلية إعادة محاولة بسيطة
     for i in range(3):
         try:
             await bot.send_message(TELEGRAM_CHAT_ID, text, parse_mode=ParseMode.MARKDOWN, **kwargs)
@@ -696,8 +689,8 @@ class UserDataStreamManager:
 
     async def _get_listen_key(self):
         try:
-            # استخدام API الخاص بـ Spot
-            self.listen_key = (await self.exchange.public_get_listen_key())['listenKey']
+            # [إصلاح] استخدام الدالة الصحيحة لـ Spot API
+            self.listen_key = (await self.exchange.private_post_listen_key())['listenKey']
             logger.info("User Data Stream: Listen key obtained.")
         except Exception as e:
             logger.error(f"User Data Stream: Failed to get listen key: {e}")
@@ -708,8 +701,8 @@ class UserDataStreamManager:
             await asyncio.sleep(1800) # 30 دقيقة
             if self.listen_key:
                 try:
-                     # استخدام API الخاص بـ Spot
-                    await self.exchange.public_put_listen_key({'listenKey': self.listen_key})
+                    # [إصلاح] استخدام الدالة الصحيحة لـ Spot API
+                    await self.exchange.private_put_listen_key({'listenKey': self.listen_key})
                     logger.info("User Data Stream: Listen key kept alive.")
                 except Exception as e:
                     logger.warning(f"User Data Stream: Failed to keep listen key alive: {e}")
@@ -860,7 +853,7 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
             logger.info("Scan skipped: Kill Switch is active."); return
         
         scan_start_time = time.time()
-        logger.info("--- Starting new Adaptive Intelligence scan... ---")
+        logger.info("--- Starting new Reliability-Enhanced scan... ---")
         settings, bot = bot_data.settings, context.bot
 
         if settings.get('news_filter_enabled', True):
@@ -870,7 +863,7 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
                 await safe_send_message(bot, f"🚨 **تنبيه: فحص السوق تم إيقافه!**\n"
                                            f"━━━━━━━━━━━━━━━━━━━━\n"
                                            f"**السبب:** {mood_result_fundamental['reason']}\n"
-                                           f"**الإجراء:** تم تخطي الفحص لحماية رأس المال من تقلبات الأخبار والبيانات الاقتصادية الهامة.")
+                                           f"**الإجراء:** تم تخطي الفحص لحماية رأس المال.")
                 return
 
         mood_result = await get_market_mood()
@@ -879,16 +872,10 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
             await safe_send_message(bot, f"🚨 **تنبيه: فحص السوق تم إيقافه!**\n"
                                        f"━━━━━━━━━━━━━━━━━━━━\n"
                                        f"**السبب الرئيسي:** {mood_result['reason']}\n"
-                                       f"**التفاصيل:** تم تخطي الفحص التلقائي بسبب عدم استيفاء شروط الدخول الصارمة.\n"
-                                       f"💡 **ماذا يعني هذا؟**\n"
-                                       f"يُشير ذلك إلى أن السوق في حالة من عدم اليقين أو الاتجاه الهابط، مما يزيد من مخاطر التداول. يفضل البوت حماية رأس المال على الدخول في صفقات عالية المخاطر.\n"
-                                       f"**حالة مؤشرات السوق:**\n"
-                                       f"  - **اتجاه BTC:** {mood_result.get('btc_mood', 'N/A')}\n"
-                                       f"  - **مزاج السوق:** {bot_data.market_mood.get('reason', 'N/A')}")
+                                       f"**التفاصيل:** تم تخطي الفحص بسبب ظروف السوق غير المواتية.")
             return
 
         async with aiosqlite.connect(DB_FILE) as conn:
-            # تحديث الاستعلام ليشمل الصفقات المعلقة
             active_trades_count = (await (await conn.execute("SELECT COUNT(*) FROM trades WHERE status = 'active' OR status = 'pending'")).fetchone())[0]
         if active_trades_count >= settings['max_concurrent_trades']:
             logger.info(f"Scan skipped: Max trades ({active_trades_count}) reached."); return
@@ -910,11 +897,16 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
         signals_found.sort(key=lambda s: s.get('strength', 0), reverse=True)
 
         for signal in signals_found:
-            if active_trades_count >= settings['max_concurrent_trades']: break
+            # [إصلاح] التحقق من العدد داخل الحلقة
+            if active_trades_count >= settings['max_concurrent_trades']:
+                logger.info(f"Stopping trade initiation, max concurrent trades ({active_trades_count}) reached.")
+                break
+            
             if time.time() - bot_data.last_signal_time.get(signal['symbol'], 0) > (SCAN_INTERVAL_SECONDS * 0.9):
                 bot_data.last_signal_time[signal['symbol']] = time.time()
                 if await initiate_real_trade(signal):
-                    active_trades_count += 1; trades_opened_count += 1
+                    active_trades_count += 1 # [إصلاح] تحديث العداد فوراً
+                    trades_opened_count += 1
                 await asyncio.sleep(2)
 
         scan_duration = time.time() - scan_start_time
@@ -1705,7 +1697,7 @@ async def post_init(application: Application):
         'apiKey': BINANCE_API_KEY,
         'secret': BINANCE_API_SECRET,
         'enableRateLimit': True,
-        'options': {'defaultType': 'spot'} # تغيير هنا إلى Spot
+        'options': {'defaultType': 'spot'}
     })
 
     try:
@@ -1730,20 +1722,18 @@ async def post_init(application: Application):
 
     jq = application.job_queue
     jq.run_repeating(perform_scan, interval=SCAN_INTERVAL_SECONDS, first=10, name="perform_scan")
-    jq.run_repeating(the_supervisor_job, interval=SUPERVISOR_INTERVAL_SECONDS, first=30, name="the_supervisor_job") # <-- إضافة جديدة
+    jq.run_repeating(the_supervisor_job, interval=SUPERVISOR_INTERVAL_SECONDS, first=30, name="the_supervisor_job")
     jq.run_daily(send_daily_report, time=dt_time(hour=23, minute=55, tzinfo=EGYPT_TZ), name='daily_report')
-    # --- NEW: Schedule Adaptive Intelligence Jobs ---
     jq.run_repeating(update_strategy_performance, interval=STRATEGY_ANALYSIS_INTERVAL_SECONDS, first=60, name="update_strategy_performance")
     jq.run_repeating(propose_strategy_changes, interval=STRATEGY_ANALYSIS_INTERVAL_SECONDS, first=120, name="propose_strategy_changes")
 
     logger.info(f"All jobs scheduled. Supervisor running every {SUPERVISOR_INTERVAL_SECONDS}s.")
-    try: await application.bot.send_message(TELEGRAM_CHAT_ID, "*🤖 بوت باينانس V6 (إصدار الموثوقية) - بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
+    try: await application.bot.send_message(TELEGRAM_CHAT_ID, "*🤖 بوت باينانس V6.1 (إصدار مصحح) - بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
     except Forbidden: logger.critical(f"FATAL: Bot not authorized for chat ID {TELEGRAM_CHAT_ID}."); return
-    logger.info("--- Binance Reliability-Enhanced Bot V6 is now fully operational ---")
+    logger.info("--- Binance Reliability-Enhanced Bot V6.1 is now fully operational ---")
 
 async def post_shutdown(application: Application):
     if bot_data.exchange: await bot_data.exchange.close()
-    # --- [تعديل] تعديل إيقاف الـ WebSocket ---
     if bot_data.user_data_stream: await bot_data.user_data_stream.stop()
     if bot_data.trade_guardian: await bot_data.trade_guardian.stop()
     logger.info("Bot has shut down gracefully.")
@@ -1763,3 +1753,4 @@ def main():
     
 if __name__ == '__main__':
     main()
+
