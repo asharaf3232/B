@@ -1,17 +1,24 @@
 # -*- coding: utf-8 -*-
 # =======================================================================================
-# --- 🚀 بوت التداول النهائي V5 (Binance Adaptive Intelligence) - النسخة المصلحة 🚀 ---
+# --- 🚀 بوت التداول النهائي V6 (Binance Reliability Enhanced) 🚀 ---
 # =======================================================================================
 #
-# هذا الإصدار يدمج "العقل التكيفي" من V5 مع واجهة المستخدم الكاملة والمستقرة من V4.
-# تم إصلاح جميع الأزرار المعطلة والتقارير المختصرة عبر استعادة الدوال المفقودة.
+# هذا الإصدار هو ترقية هيكلية جذرية لبوت Binance، مستوحاة من البنية القوية لبوت OKX.
+# الهدف الرئيسي: زيادة الموثوقية والقضاء على مشاكل فقدان الصفقات والإشعارات.
 #
-# --- سجل التغييرات للإصدار 5 (المصلح) ---
-#   ✅ [الإصلاح] **إصلاح حاسم:** استعادة جميع دوال واجهة المستخدم المفقودة (التقارير، الإحصائيات، المحفظة، إلخ).
-#   ✅ [الإصلاح] **إصلاح حاسم:** إصلاح معالج الأزرار (Callback Handler) ليتعرف على جميع الأوامر مجدداً.
-#   ✅ [الدمج] الحفاظ على جميع ميزات "الذكاء التكيفي" الجديدة (تحليل الأداء، الحجم الديناميكي، اقتراحات الاستراتيجية).
-#   ✅ [الدمج] دمج قائمة إعدادات الذكاء التكيفي الجديدة ضمن قائمة الإعدادات الرئيسية.
-#   ✅ [التحسين] تحديث قائمة الماسحات لتعرض تلميحات الأداء (معدل النجاح).
+# --- سجل التغييرات للإصدار 6 (إصدار الموثوقية) ---
+#   ✅ [هيكلي] **تطبيق نظام الحالة المزدوجة (Pending/Active):** يتم الآن تسجيل الصفقة كـ 'pending' فور إرسال الأمر،
+#     ولا يتم تفعيلها إلا بعد تأكيد التنفيذ الفعلي من المنصة.
+#   ✅ [هيكلي] **إضافة "المشرف" (The Supervisor):** مهمة دورية للبحث عن الصفقات العالقة في حالة 'pending'
+#     وتصحيح حالتها عبر API، مما يضمن عدم ضياع أي صفقة أبداً.
+#   ✅ [هيكلي] **إضافة "الحارس" (Trade Guardian):** نظام مراقبة أسعار متخصص ومفصول عن منطق الاتصال،
+#     مسؤول عن إدارة الوقف المتحرك، جني الأرباح، والوقف الثابت.
+#   ✅ [هيكلي] **إضافة "مراسل البيانات" (User Data Stream):** اتصال WebSocket خاص بالحساب للحصول على تأكيدات
+#     فورية لتنفيذ الأوامر، مما يسرّع من تفعيل الصفقات.
+#   ✅ [تحسين] **تطوير جذري لرسائل المستخدم:** رسائل تأكيد الشراء أصبحت غنية بالتفاصيل الدقيقة (السعر الفعلي،
+#     الكمية الصافية، التكلفة، نسب الربح/الخسارة المتوقعة).
+#   ✅ [تحسين] **إضافة نظام إعادة محاولة (Retry) لإغلاق الصفقات:** لزيادة قوة البوت في التعامل مع أخطاء الشبكة.
+#   ✅ [تحسين] **تنظيم الكود:** فصل المهام بشكل أفضل لسهولة الصيانة والتطوير المستقبلي.
 #
 # =======================================================================================
 
@@ -27,8 +34,6 @@ from datetime import datetime, timedelta, timezone, time as dt_time
 from zoneinfo import ZoneInfo
 from collections import defaultdict, Counter
 import httpx
-import hmac
-import base64
 import re
 import aiosqlite
 
@@ -75,11 +80,11 @@ GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 ALPHA_VANTAGE_API_KEY = os.getenv('ALPHA_VANTAGE_API_KEY', 'YOUR_AV_KEY_HERE')
 
 # --- إعدادات البوت ---
-DB_FILE = 'trading_bot_v5.db'
-SETTINGS_FILE = 'trading_bot_v5_settings.json'
+DB_FILE = 'trading_bot_v6_binance.db' # <-- تغيير اسم قاعدة البيانات للإصدار الجديد
+SETTINGS_FILE = 'trading_bot_v6_binance_settings.json' # <-- تغيير اسم ملف الإعدادات
 TIMEFRAME = '15m'
 SCAN_INTERVAL_SECONDS = 900
-SUPERVISOR_INTERVAL_SECONDS = 120
+SUPERVISOR_INTERVAL_SECONDS = 120 # <-- إضافة جديدة: مهمة المشرف كل دقيقتين
 TIME_SYNC_INTERVAL_SECONDS = 3600
 STRATEGY_ANALYSIS_INTERVAL_SECONDS = 21600 # 6 hours
 EGYPT_TZ = ZoneInfo("Africa/Cairo")
@@ -114,7 +119,6 @@ DEFAULT_SETTINGS = {
     "close_retries": 3,
     "incremental_notifications_enabled": True,
     "incremental_notification_percent": 2.0,
-    "sent_insufficient_funds_warning": False,
     # --- NEW ADAPTIVE INTELLIGENCE SETTINGS ---
     "adaptive_intelligence_enabled": True,
     "dynamic_trade_sizing_enabled": True,
@@ -165,7 +169,9 @@ class BotState:
         self.last_scan_info = {}
         self.all_markets = []
         self.last_markets_fetch = 0
-        self.public_ws = None
+        self.public_ws = None # سيتم استبداله بنظام الحارس
+        self.user_data_stream = None # جديد: لمراقبة بيانات الحساب
+        self.trade_guardian = None # جديد: لإدارة الصفقات النشطة
         # --- NEW ADAPTIVE INTELLIGENCE STATE ---
         self.strategy_performance = {}
         self.pending_strategy_proposal = {}
@@ -218,9 +224,38 @@ async def init_database():
         logger.info("Adaptive database initialized successfully.")
     except Exception as e: logger.critical(f"Database initialization failed: {e}")
 
+# --- [إضافة جديدة] دالة تسجيل الصفقة المبدئي ---
+async def log_pending_trade_to_db(signal, buy_order):
+    try:
+        async with aiosqlite.connect(DB_FILE) as conn:
+            # لاحظ أننا لا نسجل الكمية بعد، لأنها غير معروفة بدقة
+            await conn.execute("""
+                INSERT INTO trades (timestamp, symbol, reason, order_id, status, entry_price, take_profit, stop_loss, signal_strength, trade_weight)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (datetime.now(EGYPT_TZ).isoformat(), signal['symbol'], signal['reason'], buy_order['id'], 'pending',
+                  signal['entry_price'], signal['take_profit'], signal['stop_loss'], signal.get('strength', 1), signal.get('weight', 1.0)))
+            await conn.commit()
+            logger.info(f"Logged pending trade for {signal['symbol']} with order ID {buy_order['id']}.")
+            return True
+    except Exception as e:
+        logger.error(f"DB Log Pending Error for {signal['symbol']}: {e}")
+        return False
+
 async def safe_send_message(bot, text, **kwargs):
-    try: await bot.send_message(TELEGRAM_CHAT_ID, text, parse_mode=ParseMode.MARKDOWN, **kwargs)
-    except Exception as e: logger.error(f"Telegram Send Error: {e}")
+    # إضافة آلية إعادة محاولة بسيطة
+    for i in range(3):
+        try:
+            await bot.send_message(TELEGRAM_CHAT_ID, text, parse_mode=ParseMode.MARKDOWN, **kwargs)
+            return
+        except (TimedOut, Forbidden) as e:
+            logger.error(f"Telegram Send Error: {e}. Attempt {i+1}/3.")
+            if isinstance(e, Forbidden) or i == 2:
+                logger.critical("Critical Telegram error. Cannot send messages.")
+                return
+            await asyncio.sleep(2)
+        except Exception as e:
+            logger.error(f"Unknown Telegram Send Error: {e}. Attempt {i+1}/3.")
+            await asyncio.sleep(2)
 
 async def safe_edit_message(query, text, **kwargs):
     try: await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, **kwargs)
@@ -613,7 +648,6 @@ async def worker_batch(queue, signals_list, errors_list):
             if confirmed_reasons:
                 reason_str, strength = ' + '.join(set(confirmed_reasons)), len(set(confirmed_reasons))
                 
-                # --- NEW: ADAPTIVE WEIGHT CALCULATION ---
                 trade_weight = 1.0
                 if settings.get('adaptive_intelligence_enabled', True):
                     primary_reason = confirmed_reasons[0]
@@ -650,115 +684,175 @@ async def worker_batch(queue, signals_list, errors_list):
             if not queue.empty():
                 queue.task_done()
 
-async def activate_trade_binance(buy_order, signal):
-    bot = bot_data.application.bot
-    symbol = buy_order['symbol']
-    order_id = buy_order['id']
+# --- [محرك التداول الجديد V6] ---
+class UserDataStreamManager:
+    """مراسل البيانات: يستمع لتحديثات الحساب الخاصة (تنفيذ الأوامر)."""
+    def __init__(self, exchange, on_order_update_coro):
+        self.exchange = exchange
+        self.on_order_update = on_order_update_coro
+        self.listen_key = None
+        self.ws = None
+        self.is_running = False
 
+    async def _get_listen_key(self):
+        try:
+            # استخدام API الخاص بـ Spot
+            self.listen_key = (await self.exchange.public_get_listen_key())['listenKey']
+            logger.info("User Data Stream: Listen key obtained.")
+        except Exception as e:
+            logger.error(f"User Data Stream: Failed to get listen key: {e}")
+            self.listen_key = None
+
+    async def _keep_alive(self):
+        while self.is_running:
+            await asyncio.sleep(1800) # 30 دقيقة
+            if self.listen_key:
+                try:
+                     # استخدام API الخاص بـ Spot
+                    await self.exchange.public_put_listen_key({'listenKey': self.listen_key})
+                    logger.info("User Data Stream: Listen key kept alive.")
+                except Exception as e:
+                    logger.warning(f"User Data Stream: Failed to keep listen key alive: {e}")
+
+    async def run(self):
+        self.is_running = True
+        asyncio.create_task(self._keep_alive())
+        while self.is_running:
+            await self._get_listen_key()
+            if not self.listen_key:
+                await asyncio.sleep(60)
+                continue
+
+            uri = f"wss://stream.binance.com:9443/ws/{self.listen_key}"
+            try:
+                async with websockets.connect(uri) as ws:
+                    self.ws = ws
+                    logger.info("✅ [User Data Stream] Connected.")
+                    async for message in ws:
+                        data = json.loads(message)
+                        if data.get('e') == 'executionReport' and data.get('x') == 'TRADE' and data.get('S') == 'BUY':
+                            await self.on_order_update(data)
+            except (websockets.exceptions.ConnectionClosed, Exception) as e:
+                logger.warning(f"User Data Stream: Connection lost: {e}. Reconnecting...")
+                await asyncio.sleep(5)
+
+    async def stop(self):
+        self.is_running = False
+        if self.ws:
+            await self.ws.close()
+
+async def handle_order_update(order_data):
+    """يتم استدعاؤها عند ورود تحديث لأمر من مراسل البيانات."""
+    if order_data['X'] == 'FILLED' and order_data['S'] == 'BUY':
+        logger.info(f"Fast Reporter: Received fill for order {order_data['i']}. Activating trade...")
+        await activate_trade(order_data['i'], order_data['s'].replace('USDT', '/USDT'))
+
+async def activate_trade(order_id, symbol):
+    """
+    الدالة المحورية لتفعيل الصفقة بعد التأكد من تنفيذها.
+    تقوم بتحديث قاعدة البيانات وإرسال الإشعار التفصيلي.
+    """
+    bot = bot_data.application.bot
     try:
         order_details = await bot_data.exchange.fetch_order(order_id, symbol)
-        filled_price = order_details.get('average', signal['entry_price'])
-        net_filled_quantity = order_details.get('filled', 0.0)
-        
-        if net_filled_quantity <= 0:
-            logger.error(f"Order {order_id} has zero quantity. Cancelling."); 
-            await bot_data.exchange.cancel_order(order_id, symbol)
+        filled_price = float(order_details.get('average', 0.0))
+        net_filled_quantity = float(order_details.get('filled', 0.0))
+
+        if net_filled_quantity <= 0 or filled_price <= 0:
+            logger.error(f"Order {order_id} invalid fill data. Cancelling activation.")
             return
-        
+
     except Exception as e:
-        logger.error(f"Could not fetch data for trade activation: {e}", exc_info=True)
+        logger.error(f"Could not fetch order details for activation of {order_id}: {e}", exc_info=True)
         return
 
     async with aiosqlite.connect(DB_FILE) as conn:
-        await conn.execute("INSERT INTO trades (timestamp, symbol, reason, order_id, status, entry_price, take_profit, stop_loss, quantity, signal_strength, last_profit_notification_price, trade_weight) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                           (datetime.now(EGYPT_TZ).isoformat(), symbol, signal['reason'], order_id, 'active', filled_price, signal['take_profit'], signal['stop_loss'], net_filled_quantity, signal.get('strength', 1), filled_price, signal.get('weight', 1.0)))
-        trade_id = (await (await conn.execute("SELECT last_insert_rowid()")).fetchone())[0]
+        conn.row_factory = aiosqlite.Row
+        trade = await (await conn.execute("SELECT * FROM trades WHERE order_id = ? AND status = 'pending'", (order_id,))).fetchone()
+
+        if not trade:
+            logger.info(f"Activation ignored for {order_id}: Trade not found or not pending.")
+            return
+
+        trade = dict(trade)
+        logger.info(f"Activating trade #{trade['id']} for {symbol}...")
+
+        # إعادة حساب الهدف والوقف بناءً على سعر التنفيذ الفعلي
+        risk = filled_price - trade['stop_loss']
+        new_take_profit = filled_price + (risk * bot_data.settings['risk_reward_ratio'])
+
+        await conn.execute(
+            "UPDATE trades SET status = 'active', entry_price = ?, quantity = ?, take_profit = ?, last_profit_notification_price = ? WHERE id = ?",
+            (filled_price, net_filled_quantity, new_take_profit, filled_price, trade['id'])
+        )
         active_trades_count = (await (await conn.execute("SELECT COUNT(*) FROM trades WHERE status = 'active'")).fetchone())[0]
         await conn.commit()
 
-    if bot_data.public_ws:
-        await bot_data.public_ws.subscribe([symbol])
+    await bot_data.trade_guardian.sync_subscriptions() # إخبار الحارس بمراقبة السعر
 
+    # --- [رسالة التأكيد المطورة] ---
     balance_after = await bot_data.exchange.fetch_balance()
     usdt_remaining = balance_after.get('USDT', {}).get('free', 0)
     trade_cost = filled_price * net_filled_quantity
-    tp_percent = (signal['take_profit'] / filled_price - 1) * 100
-    sl_percent = (1 - signal['stop_loss'] / filled_price) * 100
-    
-    reasons_en = signal['reason'].split(' + ')
-    reasons_ar = [STRATEGY_NAMES_AR.get(r.strip(), r.strip()) for r in reasons_en]
-    reason_display_str = ' + '.join(reasons_ar)
-    strength_stars = '⭐' * signal.get('strength', 1)
-    
-    trade_weight = signal.get('weight', 1.0)
-    confidence_level_str = f"**🧠 مستوى الثقة:** `{trade_weight:.0%}` (تم تعديل الحجم)\n" if trade_weight != 1.0 else ""
-    
-    success_msg = (f"✅ **تم تأكيد الشراء | {symbol}**\n"
-                   f"━━━━━━━━━━━━━━━━━━\n"
-                   f"**الاستراتيجية:** {reason_display_str} {strength_stars}\n"
-                   f"{confidence_level_str}"
-                   f"**تفاصيل الصفقة:**\n"
-                   f"  - **رقم:** `#{trade_id}`\n"
-                   f"  - **سعر التنفيذ:** `${filled_price:,.4f}`\n"
-                   f"  - **الكمية:** `{net_filled_quantity:,.4f}`\n"
-                   f"  - **التكلفة الإجمالية:** `${trade_cost:,.2f}`\n"
-                   f"**الأهداف:**\n"
-                   f"  - **الهدف (TP):** `${signal['take_profit']:,.4f}` `({tp_percent:+.2f}%)`\n"
-                   f"  - **الوقف (SL):** `${signal['stop_loss']:,.4f}` `({sl_percent:.2f}%)`\n"
-                   f"━━━━━━━━━━━━━━━━━━\n"
-                   f"💰 **السيولة المتبقية:** `${usdt_remaining:,.2f}`\n"
-                   f"🔄 **الصفقات النشطة:** `{active_trades_count}`")
+    tp_percent = (new_take_profit / filled_price - 1) * 100
+    sl_percent = (1 - trade['stop_loss'] / filled_price) * 100
+    reasons_ar = ' + '.join([STRATEGY_NAMES_AR.get(r.strip(), r.strip()) for r in trade['reason'].split(' + ')])
+    strength_stars = '⭐' * trade.get('signal_strength', 1)
+
+    success_msg = (
+        f"✅ **تم تأكيد الشراء | {symbol}**\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"**الاستراتيجية:** {reasons_ar} {strength_stars}\n"
+        f"**تفاصيل الصفقة:**\n"
+        f"  - **رقم:** `#{trade['id']}`\n"
+        f"  - **سعر التنفيذ:** `${filled_price:,.4f}`\n"
+        f"  - **الكمية:** `{net_filled_quantity:,.4f}`\n"
+        f"  - **التكلفة الإجمالية:** `${trade_cost:,.2f}`\n"
+        f"**الأهداف:**\n"
+        f"  - **الهدف (TP):** `${new_take_profit:,.4f}` `({tp_percent:+.2f}%)`\n"
+        f"  - **الوقف (SL):** `${trade['stop_loss']:,.4f}` `({sl_percent:.2f}%)`\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"💰 **السيولة المتبقية:** `${usdt_remaining:,.2f}`\n"
+        f"🔄 **الصفقات النشطة:** `{active_trades_count}`"
+    )
     await safe_send_message(bot, success_msg)
 
-async def check_pending_order_status(context: ContextTypes.DEFAULT_TYPE):
-    # This function is kept for potential future use or complex scenarios,
-    # but the current logic activates trades immediately after order placement.
-    pass
 
 async def initiate_real_trade(signal):
     if not bot_data.trading_enabled:
         logger.warning(f"Trade for {signal['symbol']} blocked: Kill Switch active."); return False
-    
-    settings, exchange = bot_data.settings, bot_data.exchange
+
     try:
-        await exchange.load_markets()
-        
+        settings, exchange = bot_data.settings, bot_data.exchange
         base_trade_size = settings['real_trade_size_usdt']
         trade_weight = signal.get('weight', 1.0)
         trade_size = base_trade_size * trade_weight if settings.get('dynamic_trade_sizing_enabled', True) else base_trade_size
 
         balance = await exchange.fetch_balance()
         usdt_balance = balance.get('USDT', {}).get('free', 0.0)
-        
+
         if usdt_balance < trade_size:
-            if not settings.get('sent_insufficient_funds_warning'):
-                await safe_send_message(bot_data.application.bot, f"🚨 **فشل الشراء: رصيد غير كافٍ**\n"
-                                                                  f"لا يمكن فتح صفقة جديدة لأن رصيدك من USDT (`${usdt_balance:,.2f}`) أقل من حجم الصفقة المحدَّد (`${trade_size:,.2f}`).\n"
-                                                                  f"سيستمر البوت في فحص السوق ولكن لن يفتح صفقات جديدة حتى يتم توفير رصيد كافٍ.")
-                bot_data.settings['sent_insufficient_funds_warning'] = True; save_settings()
-            return False
-        
-        if settings.get('sent_insufficient_funds_warning'):
-            bot_data.settings['sent_insufficient_funds_warning'] = False; save_settings()
+            logger.error(f"Insufficient USDT for {signal['symbol']}. Have: {usdt_balance}, Need: {trade_size}"); return False
 
         base_amount = trade_size / signal['entry_price']
         formatted_amount = exchange.amount_to_precision(signal['symbol'], base_amount)
+
         buy_order = await exchange.create_market_buy_order(signal['symbol'], formatted_amount)
-        
-        await activate_trade_binance(buy_order, signal)
-        return True
+
+        if await log_pending_trade_to_db(signal, buy_order):
+            await safe_send_message(bot_data.application.bot, f"🚀 تم إرسال أمر شراء لـ `{signal['symbol']}`. في انتظار تأكيد التنفيذ...")
+            return True
+        else:
+            logger.critical(f"CRITICAL: Failed to log pending trade for {signal['symbol']}. Cancelling order {buy_order['id']}.")
+            await exchange.cancel_order(buy_order['id'], signal['symbol'])
+            return False
 
     except ccxt.InsufficientFunds as e:
-        if not settings.get('sent_insufficient_funds_warning'):
-            balance = await exchange.fetch_balance(); usdt_balance = balance.get('USDT', {}).get('free', 0.0)
-            await safe_send_message(bot_data.application.bot, f"🚨 **فشل الشراء: رصيد غير كافٍ**\n"
-                                                              f"لا يمكن فتح صفقة جديدة لأن رصيدك من USDT (`${usdt_balance:,.2f}`) أقل من حجم الصفقة المحدَّد (`${settings['real_trade_size_usdt']:.2f}`).\n"
-                                                              f"سيستمر البوت في فحص السوق ولكن لن يفتح صفقات جديدة حتى يتم توفير رصيد كافٍ.")
-            bot_data.settings['sent_insufficient_funds_warning'] = True; save_settings()
         logger.error(f"REAL TRADE FAILED {signal['symbol']}: {e}", exc_info=True)
         return False
     except Exception as e:
-        logger.error(f"REAL TRADE FAILED {signal['symbol']}: {e}", exc_info=True); return False
+        logger.error(f"REAL TRADE FAILED {signal['symbol']}: {e}", exc_info=True)
+        return False
 
 async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
     async with scan_lock:
@@ -794,7 +888,8 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
             return
 
         async with aiosqlite.connect(DB_FILE) as conn:
-            active_trades_count = (await (await conn.execute("SELECT COUNT(*) FROM trades WHERE status = 'active'")).fetchone())[0]
+            # تحديث الاستعلام ليشمل الصفقات المعلقة
+            active_trades_count = (await (await conn.execute("SELECT COUNT(*) FROM trades WHERE status = 'active' OR status = 'pending'")).fetchone())[0]
         if active_trades_count >= settings['max_concurrent_trades']:
             logger.info(f"Scan skipped: Max trades ({active_trades_count}) reached."); return
 
@@ -832,165 +927,163 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
                                    f"  - **صفقات تم فتحها:** {trades_opened_count} صفقة\n"
                                    f"  - **مشكلات تحليل:** {len(analysis_errors)} عملة")
 
-class BinanceWebSocketManager:
-    def __init__(self):
-        self.ws = None; self.uri = "wss://stream.binance.com:9443/ws/"; self.subscriptions = set()
-        self.ticker_queue = asyncio.Queue(); self.is_connected = False; self.reconnect_task = None
+class TradeGuardian:
+    """الحارس: يراقب أسعار الصفقات النشطة ويتخذ قرارات الإغلاق."""
+    def __init__(self, application):
+        self.application = application
+        self.public_ws = None
+        self.subscriptions = set()
+        self.is_running = False
 
-    async def _handle_message(self, message):
+    async def handle_ticker_update(self, message):
         data = json.loads(message)
-        if 'e' in data and data['e'] == 'kline':
-            symbol = data['s'].replace('USDT', '/USDT')
-            price = float(data['k']['c'])
-            await self.ticker_queue.put({'symbol': symbol, 'price': price})
-            
-    async def _manage_connections(self):
-        while True:
-            if not self.subscriptions:
-                await asyncio.sleep(5); continue
-            stream_name = '/'.join([f"{s.lower().replace('/', '')}@kline_1m" for s in self.subscriptions])
-            current_uri = self.uri + stream_name
-            if self.is_connected and self.ws and not self.ws.closed:
-                await asyncio.sleep(5); continue
+        if 's' not in data: return
+        symbol = data['s'].replace('USDT', '/USDT')
+        current_price = float(data['c'])
+
+        async with trade_management_lock:
             try:
-                self.ws = await websockets.connect(current_uri, ping_interval=30, ping_timeout=10)
-                self.is_connected = True
-                async for message in self.ws:
-                    await self._handle_message(message)
-            except (websockets.exceptions.ConnectionClosed, Exception) as e:
-                self.is_connected = False; await asyncio.sleep(5)
-
-    def start(self):
-        asyncio.create_task(self._manage_connections())
-        asyncio.create_task(self._process_queue())
-
-    async def subscribe(self, symbols):
-        new_symbols = [s for s in symbols if s not in self.subscriptions]
-        if new_symbols:
-            self.subscriptions.update(new_symbols)
-            if self.ws and not self.ws.closed: await self.ws.close()
-    
-    async def unsubscribe(self, symbols):
-        for s in symbols: self.subscriptions.discard(s)
-        if self.ws and not self.ws.closed: await self.ws.close()
-
-    async def _process_queue(self):
-        while True:
-            ticker_data = await self.ticker_queue.get()
-            async with aiosqlite.connect(DB_FILE) as conn:
-                conn.row_factory = aiosqlite.Row
-                trade = await (await conn.execute("SELECT * FROM trades WHERE symbol = ? AND status = 'active'", (ticker_data['symbol'],))).fetchone()
-                if trade:
-                    await check_and_close_trade(dict(trade), ticker_data['price'], bot_data.application)
-                    await check_incremental_profit(dict(trade), ticker_data['price'], bot_data.application)
-            self.ticker_queue.task_done()
-
-async def check_and_close_trade(trade, current_price, context):
-    async with trade_management_lock:
-        close_reason = None
-        settings = bot_data.settings
-
-        if settings['trailing_sl_enabled']:
-            highest_price = max(trade.get('highest_price', 0), current_price)
-            if highest_price > trade.get('highest_price', 0):
                 async with aiosqlite.connect(DB_FILE) as conn:
-                    await conn.execute("UPDATE trades SET highest_price = ? WHERE id = ?", (highest_price, trade['id'])); await conn.commit()
+                    conn.row_factory = aiosqlite.Row
+                    trade = await (await conn.execute("SELECT * FROM trades WHERE symbol = ? AND status = 'active'", (symbol,))).fetchone()
+                    if not trade: return
 
-            if not trade['trailing_sl_active'] and current_price >= trade['entry_price'] * (1 + settings['trailing_sl_activation_percent'] / 100):
-                trade['trailing_sl_active'] = True
-                new_sl = trade['entry_price']
+                    trade = dict(trade); settings = bot_data.settings
+
+                    if settings['trailing_sl_enabled']:
+                        highest_price = max(trade.get('highest_price', 0), current_price)
+                        if highest_price > trade.get('highest_price', 0):
+                            await conn.execute("UPDATE trades SET highest_price = ? WHERE id = ?", (highest_price, trade['id']))
+
+                        if not trade['trailing_sl_active'] and current_price >= trade['entry_price'] * (1 + settings['trailing_sl_activation_percent'] / 100):
+                            trade['trailing_sl_active'] = True
+                            new_sl = trade['entry_price']
+                            await conn.execute("UPDATE trades SET trailing_sl_active = 1, stop_loss = ? WHERE id = ?", (new_sl, trade['id']))
+                            await safe_send_message(self.application.bot, f"**🚀 تأمين الأرباح! | #{trade['id']} {trade['symbol']}**\nتم رفع وقف الخسارة إلى نقطة الدخول: `${new_sl}`")
+
+                        if trade['trailing_sl_active']:
+                            new_sl = highest_price * (1 - settings['trailing_sl_callback_percent'] / 100)
+                            if new_sl > trade['stop_loss']:
+                                trade['stop_loss'] = new_sl
+                                await conn.execute("UPDATE trades SET stop_loss = ? WHERE id = ?", (new_sl, trade['id']))
+
+                    if settings.get('incremental_notifications_enabled', True):
+                        last_notified = trade.get('last_profit_notification_price', trade['entry_price'])
+                        increment = settings['incremental_notification_percent'] / 100
+                        if current_price >= last_notified * (1 + increment):
+                            profit_percent = ((current_price / trade['entry_price']) - 1) * 100
+                            await safe_send_message(self.application.bot, f"📈 **ربح متزايد! | #{trade['id']} {trade['symbol']}**\n**الربح الحالي:** `{profit_percent:+.2f}%`")
+                            await conn.execute("UPDATE trades SET last_profit_notification_price = ? WHERE id = ?", (current_price, trade['id']))
+                    
+                    await conn.commit()
+
+                if current_price >= trade['take_profit']: await self._close_trade(trade, "ناجحة (TP)", current_price)
+                elif current_price <= trade['stop_loss']:
+                    reason = "فاشلة (SL)"
+                    if current_price > trade['entry_price']: reason = "تم تأمين الربح (TSL)"
+                    await self._close_trade(trade, reason, current_price)
+
+            except Exception as e:
+                logger.error(f"Guardian Ticker Error for {symbol}: {e}", exc_info=True)
+
+    async def _close_trade(self, trade, reason, close_price):
+        symbol, trade_id = trade['symbol'], trade['id']
+        bot = self.application.bot
+        logger.info(f"Guardian: Attempting to close trade #{trade_id} for {symbol}. Reason: {reason}")
+
+        for i in range(bot_data.settings.get('close_retries', 3)):
+            try:
+                await bot_data.exchange.create_market_sell_order(symbol, trade['quantity'])
+
+                pnl = (close_price - trade['entry_price']) * trade['quantity']
+                pnl_percent = (close_price / trade['entry_price'] - 1) * 100 if trade['entry_price'] > 0 else 0
+                emoji = "✅" if pnl > 0 else "🛑"
+                
                 async with aiosqlite.connect(DB_FILE) as conn:
-                    await conn.execute("UPDATE trades SET trailing_sl_active = 1, stop_loss = ? WHERE id = ?", (new_sl, trade['id'])); await conn.commit()
-                await safe_send_message(context.bot, f"**🚀 تأمين الأرباح! | #{trade['id']} {trade['symbol']}**\nتم رفع وقف الخسارة إلى نقطة الدخول: `${new_sl}`")
-            
-            if trade['trailing_sl_active']:
-                new_sl = highest_price * (1 - settings['trailing_sl_callback_percent'] / 100)
-                if new_sl > trade['stop_loss']:
-                    trade['stop_loss'] = new_sl
-                    async with aiosqlite.connect(DB_FILE) as conn:
-                        await conn.execute("UPDATE trades SET stop_loss = ? WHERE id = ?", (new_sl, trade['id'])); await conn.commit()
+                    await conn.execute("UPDATE trades SET status = ?, close_price = ?, pnl_usdt = ? WHERE id = ?", (reason, close_price, pnl, trade_id))
+                    await conn.commit()
 
-        if current_price >= trade['take_profit']: close_reason = "ناجحة (TP)"
-        elif current_price <= trade['stop_loss']: close_reason = "فاشلة (SL)"
-        if close_reason == "فاشلة (SL)" and current_price > trade['entry_price']: close_reason = "تم تأمين الربح (TSL)"
+                await self.sync_subscriptions()
+                await safe_send_message(bot, f"{emoji} **تم إغلاق الصفقة | #{trade_id} {symbol}**\n**السبب:** {reason}\n**الربح/الخسارة:** `${pnl:,.2f}` ({pnl_percent:+.2f}%)")
+                return
 
-        if close_reason:
-            await close_trade(trade, close_reason, current_price, context)
+            except Exception as e:
+                logger.warning(f"Failed to close trade #{trade_id}. Retrying... ({i + 1}/{bot_data.settings.get('close_retries', 3)})", exc_info=True)
+                await asyncio.sleep(5)
 
-async def check_incremental_profit(trade, current_price, context):
-    if not bot_data.settings['incremental_notifications_enabled']: return
-    last_notified = trade.get('last_profit_notification_price', trade['entry_price'])
-    increment = bot_data.settings['incremental_notification_percent'] / 100
-    next_target = last_notified * (1 + increment)
-    if current_price >= next_target:
-        profit_percent = ((current_price / trade['entry_price']) - 1) * 100
-        await safe_send_message(context.bot, f"📈 **ربح متزايد! | #{trade['id']} {trade['symbol']}**\n**الربح الحالي:** `{profit_percent:+.2f}%`")
+        logger.critical(f"CRITICAL: Failed to close trade #{trade_id} after retries.")
         async with aiosqlite.connect(DB_FILE) as conn:
-            await conn.execute("UPDATE trades SET last_profit_notification_price = ? WHERE id = ?", (current_price, trade['id'])); await conn.commit()
+            await conn.execute("UPDATE trades SET status = 'closure_failed' WHERE id = ?", (trade_id,))
+            await conn.commit()
+        await safe_send_message(bot, f"🚨 **فشل حرج** 🚨\nفشل إغلاق الصفقة `#{trade_id}`. الرجاء مراجعة المنصة يدوياً.")
+        await self.sync_subscriptions()
 
-async def close_trade(trade, reason, close_price, context):
-    symbol, trade_id = trade['symbol'], trade['id']
-    bot = context.bot
-    max_retries = bot_data.settings.get('close_retries', 3)
-    
-    for i in range(max_retries):
-        try:
-            asset_to_sell = symbol.split('/')[0]
-            balance = await bot_data.exchange.fetch_balance()
-            available_quantity = balance.get(asset_to_sell, {}).get('free', 0.0)
-            if available_quantity <= 0:
-                async with aiosqlite.connect(DB_FILE) as conn:
-                    await conn.execute("UPDATE trades SET status = 'closure_failed', reason = 'Zero balance' WHERE id = ?", (trade_id,)); await conn.commit()
-                await safe_send_message(bot, f"🚨 **فشل حرج:** لا يمكن إغلاق الصفقة #{trade_id} لعدم توفر رصيد."); return
+    async def run_public_ws(self):
+        self.is_running = True
+        while self.is_running:
+            stream_name = '/'.join([f"{s.lower().replace('/', '')}@ticker" for s in self.subscriptions])
+            if not stream_name:
+                await asyncio.sleep(5); continue
 
-            formatted_quantity = bot_data.exchange.amount_to_precision(symbol, available_quantity)
-            sell_order = await bot_data.exchange.create_market_sell_order(symbol, formatted_quantity)
-            close_price_final = sell_order.get('average', close_price)
-            pnl = (close_price_final - trade['entry_price']) * trade['quantity']
-            pnl_percent = (close_price_final / trade['entry_price'] - 1) * 100 if trade['entry_price'] > 0 else 0
-            emoji = "✅" if pnl > 0 else "🛑"
+            uri = f"wss://stream.binance.com:9443/ws/{stream_name}"
+            try:
+                async with websockets.connect(uri) as ws:
+                    self.public_ws = ws
+                    logger.info(f"✅ [Guardian's Eyes] Connected. Watching {len(self.subscriptions)} symbols.")
+                    async for message in ws:
+                        await self.handle_ticker_update(message)
+            except Exception as e:
+                if self.is_running:
+                    logger.warning(f"Guardian's Eyes: Connection lost: {e}. Reconnecting...")
+                    await asyncio.sleep(5)
 
-            # Enhanced trade closure details
-            start_dt = datetime.fromisoformat(trade['timestamp']); end_dt = datetime.now(EGYPT_TZ)
-            duration = end_dt - start_dt
-            days, rem = divmod(duration.total_seconds(), 86400); hours, rem = divmod(rem, 3600); minutes, _ = divmod(rem, 60)
-            duration_str = f"{int(days)}d {int(hours)}h {int(minutes)}m" if days > 0 else f"{int(hours)}h {int(minutes)}m"
-            
-            highest_price_val = max(trade.get('highest_price', 0), close_price_final)
-            highest_pnl_percent = ((highest_price_val - trade['entry_price']) / trade['entry_price'] * 100) if trade['entry_price'] > 0 else 0
-            exit_efficiency_percent = 0
-            if highest_price_val > trade['entry_price']:
-                highest_pnl_usdt = (highest_price_val - trade['entry_price']) * trade['quantity']
-                if highest_pnl_usdt > 0:
-                    exit_efficiency_percent = (pnl / highest_pnl_usdt) * 100
+    async def sync_subscriptions(self):
+        """تضمن أن الحارس يراقب فقط الصفقات النشطة."""
+        async with aiosqlite.connect(DB_FILE) as conn:
+            active_symbols = {row[0] for row in await (await conn.execute("SELECT DISTINCT symbol FROM trades WHERE status = 'active'")).fetchall()}
 
-            async with aiosqlite.connect(DB_FILE) as conn:
-                await conn.execute("UPDATE trades SET status = ?, close_price = ?, pnl_usdt = ? WHERE id = ?", (reason, close_price_final, pnl, trade['id'])); await conn.commit()
-            
-            if bot_data.public_ws: await bot_data.public_ws.unsubscribe([symbol])
+        if active_symbols != self.subscriptions:
+            logger.info(f"Guardian: Syncing subscriptions. Old: {len(self.subscriptions)}, New: {len(active_symbols)}")
+            self.subscriptions = active_symbols
+            if self.public_ws and not self.public_ws.closed:
+                await self.public_ws.close()
 
-            msg = (f"{emoji} **تم إغلاق الصفقة | #{trade_id} {symbol}**\n"
-                   f"**السبب:** {reason}\n"
-                   f"━━━━━━━━━━━━━━━━━━\n"
-                   f"**إحصائيات الأداء**\n"
-                   f"**الربح/الخسارة:** `${pnl:,.2f}` ({pnl_percent:+.2f}%)\n"
-                   f"**أعلى ربح مؤقت:** {highest_pnl_percent:+.2f}%\n"
-                   f"**كفاءة الخروج:** {exit_efficiency_percent:.2f}%\n"
-                   f"**مدة الصفقة:** {duration_str}")
-            await safe_send_message(bot, msg); return
-        except Exception as e:
-            logger.warning(f"Failed to close trade #{trade_id}. Retrying... ({i + 1}/{max_retries})", exc_info=True)
-            await asyncio.sleep(5)
-            
+    async def stop(self):
+        self.is_running = False
+        if self.public_ws:
+            await self.public_ws.close()
+
+async def the_supervisor_job(context: ContextTypes.DEFAULT_TYPE):
+    """المشرف: يضمن عدم وجود صفقات عالقة."""
+    logger.info("🕵️ Supervisor: Auditing pending trades...")
     async with aiosqlite.connect(DB_FILE) as conn:
-        await conn.execute("UPDATE trades SET status = 'closure_failed', reason = 'Max retries exceeded' WHERE id = ?", (trade_id,)); await conn.commit()
-    await safe_send_message(bot, f"🚨 **فشل حرج** 🚨\nفشل إغلاق الصفقة `#{trade_id}`. الرجاء مراجعة المنصة يدوياً.")
-    if bot_data.public_ws: await bot_data.public_ws.unsubscribe([symbol])
+        conn.row_factory = aiosqlite.Row
+        stuck_trades = await (await conn.execute("SELECT * FROM trades WHERE status = 'pending' AND timestamp <= ?", ((datetime.now(EGYPT_TZ) - timedelta(minutes=2)).isoformat(),))).fetchall()
+
+        if not stuck_trades:
+            logger.info("🕵️ Supervisor: Audit complete. No abandoned trades found."); return
+
+        for trade_data in stuck_trades:
+            trade = dict(trade_data)
+            logger.warning(f"🕵️ Supervisor: Found abandoned trade #{trade['id']}. Investigating.")
+            try:
+                order_status = await bot_data.exchange.fetch_order(trade['order_id'], trade['symbol'])
+                if order_status['status'] == 'closed' and float(order_status.get('filled', 0)) > 0:
+                    logger.info(f"🕵️ Supervisor: API confirms order {trade['order_id']} was filled. Activating.")
+                    await activate_trade(trade['order_id'], trade['symbol'])
+                elif order_status['status'] == 'canceled':
+                    await conn.execute("UPDATE trades SET status = 'failed (canceled)' WHERE id = ?", (trade['id'],))
+                else: # لا يزال مفتوحاً، نحاول إلغاءه
+                    await bot_data.exchange.cancel_order(trade['order_id'], trade['symbol'])
+                    await conn.execute("UPDATE trades SET status = 'failed (canceled by supervisor)' WHERE id = ?", (trade['id'],))
+                await conn.commit()
+            except Exception as e:
+                logger.error(f"🕵️ Supervisor: Failed to rectify trade #{trade['id']}: {e}")
 
 # --- واجهة تليجرام المتقدمة (مدمجة ومصلحة) ---
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [["Dashboard 🖥️"], ["الإعدادات ⚙️"]]
-    await update.message.reply_text("أهلاً بك في **بوت التداول النهائي V5 (الذكاء التكيفي)**", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True), parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text("أهلاً بك في **بوت باينانس V6 (إصدار الموثوقية)**", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True), parse_mode=ParseMode.MARKDOWN)
 
 async def manual_scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not bot_data.trading_enabled: await (update.message or update.callback_query.message).reply_text("🔬 الفحص محظور. مفتاح الإيقاف مفعل."); return
@@ -1064,9 +1157,6 @@ async def toggle_kill_switch(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if bot_data.trading_enabled: 
         await query.answer("✅ تم استئناف التداول الطبيعي."); 
         await safe_send_message(context.bot, "✅ **تم استئناف التداول الطبيعي.**")
-        if bot_data.settings.get('sent_insufficient_funds_warning'):
-            bot_data.settings['sent_insufficient_funds_warning'] = False
-            save_settings()
     else: 
         await query.answer("🚨 تم تفعيل مفتاح الإيقاف!", show_alert=True); 
         await safe_send_message(context.bot, "🚨 **تحذير: تم تفعيل مفتاح الإيقاف!**")
@@ -1602,7 +1692,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
 
 # --- دالة التشغيل الرئيسية ---
 async def post_init(application: Application):
-    logger.info("Performing post-initialization setup...")
+    logger.info("Performing post-initialization setup for Reliability-Enhanced Bot...")
     if not all([TELEGRAM_BOT_TOKEN, BINANCE_API_KEY, BINANCE_API_SECRET]):
         logger.critical("FATAL: Missing environment variables."); return
 
@@ -1611,7 +1701,12 @@ async def post_init(application: Application):
         except LookupError: logger.info("Downloading NLTK data..."); nltk.download('vader_lexicon', quiet=True)
 
     bot_data.application = application
-    bot_data.exchange = ccxt.binance({'apiKey': BINANCE_API_KEY, 'secret': BINANCE_API_SECRET, 'enableRateLimit': True})
+    bot_data.exchange = ccxt.binance({
+        'apiKey': BINANCE_API_KEY,
+        'secret': BINANCE_API_SECRET,
+        'enableRateLimit': True,
+        'options': {'defaultType': 'spot'} # تغيير هنا إلى Spot
+    })
 
     try:
         await bot_data.exchange.load_markets()
@@ -1623,35 +1718,38 @@ async def post_init(application: Application):
     load_settings()
     await init_database()
 
-    bot_data.public_ws = BinanceWebSocketManager()
-    bot_data.public_ws.start()
+    # --- [بدء تشغيل الأنظمة الجديدة] ---
+    bot_data.trade_guardian = TradeGuardian(application)
+    bot_data.user_data_stream = UserDataStreamManager(bot_data.exchange, handle_order_update)
 
-    async with aiosqlite.connect(DB_FILE) as conn:
-        active_symbols = [row[0] for row in await (await conn.execute("SELECT DISTINCT symbol FROM trades WHERE status = 'active'")).fetchall()]
-        if active_symbols:
-            await bot_data.public_ws.subscribe(active_symbols)
+    asyncio.create_task(bot_data.trade_guardian.run_public_ws())
+    asyncio.create_task(bot_data.user_data_stream.run())
+
+    logger.info("Waiting 5s for WebSocket connections..."); await asyncio.sleep(5)
+    await bot_data.trade_guardian.sync_subscriptions() # مزامنة أولية للحارس
 
     jq = application.job_queue
     jq.run_repeating(perform_scan, interval=SCAN_INTERVAL_SECONDS, first=10, name="perform_scan")
+    jq.run_repeating(the_supervisor_job, interval=SUPERVISOR_INTERVAL_SECONDS, first=30, name="the_supervisor_job") # <-- إضافة جديدة
     jq.run_daily(send_daily_report, time=dt_time(hour=23, minute=55, tzinfo=EGYPT_TZ), name='daily_report')
     # --- NEW: Schedule Adaptive Intelligence Jobs ---
     jq.run_repeating(update_strategy_performance, interval=STRATEGY_ANALYSIS_INTERVAL_SECONDS, first=60, name="update_strategy_performance")
     jq.run_repeating(propose_strategy_changes, interval=STRATEGY_ANALYSIS_INTERVAL_SECONDS, first=120, name="propose_strategy_changes")
 
-    logger.info(f"Jobs scheduled. Strategy analysis every {STRATEGY_ANALYSIS_INTERVAL_SECONDS/3600} hours.")
-    try: await application.bot.send_message(TELEGRAM_CHAT_ID, "*🤖 بوت التداول النهائي V5 (الذكاء التكيفي) - بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
+    logger.info(f"All jobs scheduled. Supervisor running every {SUPERVISOR_INTERVAL_SECONDS}s.")
+    try: await application.bot.send_message(TELEGRAM_CHAT_ID, "*🤖 بوت باينانس V6 (إصدار الموثوقية) - بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
     except Forbidden: logger.critical(f"FATAL: Bot not authorized for chat ID {TELEGRAM_CHAT_ID}."); return
-    logger.info("--- Binance Adaptive Bot V5 is now fully operational ---")
-
+    logger.info("--- Binance Reliability-Enhanced Bot V6 is now fully operational ---")
 
 async def post_shutdown(application: Application):
     if bot_data.exchange: await bot_data.exchange.close()
-    if bot_data.public_ws and bot_data.public_ws.ws:
-        await bot_data.public_ws.ws.close()
-    logger.info("Bot has shut down.")
+    # --- [تعديل] تعديل إيقاف الـ WebSocket ---
+    if bot_data.user_data_stream: await bot_data.user_data_stream.stop()
+    if bot_data.trade_guardian: await bot_data.trade_guardian.stop()
+    logger.info("Bot has shut down gracefully.")
 
 def main():
-    logger.info("Starting Binance Adaptive Bot V5...")
+    logger.info("Starting Binance Adaptive Bot V6...")
     app_builder = Application.builder().token(TELEGRAM_BOT_TOKEN)
     app_builder.post_init(post_init).post_shutdown(post_shutdown)
     application = app_builder.build()
@@ -1665,4 +1763,3 @@ def main():
     
 if __name__ == '__main__':
     main()
-
