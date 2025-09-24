@@ -1,36 +1,16 @@
 # -*- coding: utf-8 -*-
 # =======================================================================================
-# --- 🚀 بوت التداول النهائي V6.3 (Reliability & Accuracy Patched by Senior Dev) 🚀 ---
+# --- 🚀 بوت التداول النهائي V6.4 (Multi-Trade Per Symbol Fix) 🚀 ---
 # =======================================================================================
 #
-# هذا الإصدار هو ترقية هيكلية جذرية لبوت Binance، مستوحاة من البنية القوية لبوت OKX.
-# الهدف الرئيسي: زيادة الموثوقية والقضاء على مشاكل فقدان الصفقات والإشعارات.
+# هذا الإصدار يحل مشكلة فتح صفقات متعددة على نفس العملة.
+# التعديل الرئيسي: إضافة تحقق في `process_signals` و`initiate_real_trade` لمنع تكرار الصفقات على نفس الرمز.
 #
-# --- سجل التغييرات للإصدار 6.3 (نسخة المطور الخبير المصححة) ---
-#   ✅ [تصحيح دقة] **تصحيح حساب الربح/الخسارة (PnL):** تم تعديل دالة `close_trade` بشكل جذري.
-#     الآن، بعد إرسال أمر البيع، يقوم البوت بانتظار لحظة ثم جلب تفاصيل الأمر المنفذ
-#     للحصول على "سعر البيع الفعلي" (Average Fill Price). هذا يضمن حساب الربح والخسارة
-#     بشكل دقيق للغاية مع أخذ الانزلاق السعري (Slippage) في الاعتبار، بدلاً من الاعتماد
-#     على سعر تفعيل الشرط فقط.
-#   ✅ [تحصين منطقي] **منع الإغلاق المزدوج للصفقات (Idempotency):** تم إضافة تحقق في بداية
-#     دالة `close_trade` للتأكد من أن الصفقة ما زالت في حالة 'active'. هذا يمنع أي أخطاء
-#     منطقية أو محاولات بيع متكررة لنفس الصفقة إذا تم استدعاء الدالة مرتين بسرعة.
-#   ✅ [تحصين استقرار] **معالجة أخطاء تحليل الإطارات الزمنية المتعددة (HTF):** تم إحاطة
-#     المنطق المسؤول عن جلب وتحليل بيانات الإطار الزمني الأعلى (مثل 4 ساعات) داخل
-#     الماسح الرئيسي `worker_batch` بكتلة `try-except`. إذا فشلت هذه العملية (بسبب
-#     مشاكل في الشبكة أو عدم توفر بيانات كافية)، سيتم تسجيل تحذير وتخطي العملة بأمان،
-#     بدلاً من التسبب في انهيار العامل (Worker) بأكمله.
-#   ✅ [إصلاح حاسم] **إصلاح User Data Stream:** تم تصحيح أسماء الدوال المسؤولة عن جلب مفتاح الاستماع بالكامل،
-#     باستخدام الدوال الرسمية من ccxt لـ Binance Spot (privatePostUserDataStream و privatePutUserDataStream).
-#     هذا يعيد تفعيل نظام التأكيد الفوري للصفقات ويمنع التأخير أو فقدان التحديثات.
-#   ✅ [تحصين] **تحديث عداد الصفقات داخل الحلقة:** تم تعديل حلقة معالجة الإشارات (process_signals) لتحديث
-#     عداد الصفقات النشطة فوراً بعد كل عملية شراء ناجحة، مما يضمن عدم تجاوز الحد الأقصى حتى لو تأخر التأكيد.
-#   ✅ [هيكلي] **تطبيق نظام الحالة المزدوجة (Pending/Active):** يتم الآن تسجيل الصفقة كـ 'pending' فور إرسال الأمر،
-#     ولا يتم تفعيلها إلا بعد تأكيد التنفيذ الفعلي من المنصة.
-#   ✅ [هيكلي] **إضافة "المشرف" (The Supervisor):** مهمة دورية للبحث عن الصفقات العالقة في حالة 'pending'
-#     وتصحيح حالتها عبر API، مما يضمن عدم ضياع أي صفقة أبداً.
-#   ✅ [هيكلي] **إضافة "الحارس" (Trade Guardian):** نظام مراقبة أسعار متخصص ومفصول عن منطق الاتصال.
-#   ✅ [تحسين] **تطوير جذري لرسائل المستخدم:** رسائل تأكيد الشراء أصبحت غنية بالتفاصيل الدقيقة.
+# --- سجل التغييرات للإصدار 6.4 ---
+#   ✅ [إصلاح حاسم] **منع الصفقات المتعددة على نفس العملة:** تم إضافة دالة `has_active_trade_for_symbol` للتحقق من وجود صفقة نشطة أو معلقة للرمز قبل فتح صفقة جديدة.
+#     - في `process_signals`: تخطي الإشارة إذا كان هناك صفقة نشطة/معلقة للرمز.
+#     - في `initiate_real_trade`: إضافة تحقق إضافي للأمان.
+#   ✅ [تحسين] **تحديث الرسائل:** إضافة سبب رفض الإشارة في السجلات إذا تم تجاهل إشارة بسبب صفقة موجودة.
 #
 # =======================================================================================
 
@@ -139,6 +119,8 @@ DEFAULT_SETTINGS = {
     "strategy_deactivation_threshold_wr": 45.0,
     "dynamic_sizing_max_increase_pct": 25.0,
     "dynamic_sizing_max_decrease_pct": 50.0,
+    # --- NEW: منع الصفقات المتعددة ---
+    "allow_multi_trades_per_symbol": False,  # إعداد جديد للسماح أو منع متعدد
 }
 
 STRATEGY_NAMES_AR = {
@@ -233,6 +215,20 @@ async def init_database():
             await conn.commit()
         logger.info("Adaptive database initialized successfully.")
     except Exception as e: logger.critical(f"Database initialization failed: {e}")
+
+# --- [جديد] دالة التحقق من وجود صفقة نشطة للرمز ---
+async def has_active_trade_for_symbol(symbol):
+    """التحقق من وجود صفقة نشطة أو معلقة للرمز المحدد."""
+    try:
+        async with aiosqlite.connect(DB_FILE) as conn:
+            count = await (await conn.execute(
+                "SELECT COUNT(*) FROM trades WHERE symbol = ? AND status IN ('active', 'pending')",
+                (symbol,)
+            )).fetchone()
+            return count[0] > 0
+    except Exception as e:
+        logger.error(f"Error checking active trade for {symbol}: {e}")
+        return False
 
 async def log_pending_trade_to_db(signal, buy_order):
     try:
@@ -662,7 +658,7 @@ async def worker_batch(queue, signals_list, errors_list):
 
             if confirmed_reasons:
                 reason_str, strength = ' + '.join(set(confirmed_reasons)), len(set(confirmed_reasons))
-                
+
                 trade_weight = 1.0
                 if settings.get('adaptive_intelligence_enabled', True):
                     primary_reason = confirmed_reasons[0]
@@ -672,7 +668,7 @@ async def worker_batch(queue, signals_list, errors_list):
                             trade_weight = 1 - (settings['dynamic_sizing_max_decrease_pct'] / 100.0)
                         elif perf['win_rate'] > 70 and perf['profit_factor'] > 1.5:
                             trade_weight = 1 + (settings['dynamic_sizing_max_increase_pct'] / 100.0)
-                        
+
                         if perf['win_rate'] < settings['strategy_deactivation_threshold_wr'] and perf['total_trades'] > settings['strategy_analysis_min_trades']:
                            logger.warning(f"Signal for {symbol} from weak strategy '{primary_reason}' ignored.")
                            queue.task_done(); continue
@@ -837,6 +833,13 @@ async def initiate_real_trade(signal):
     if not bot_data.trading_enabled:
         logger.warning(f"Trade for {signal['symbol']} blocked: Kill Switch active."); return False
 
+    # --- [جديد] التحقق من عدم وجود صفقة نشطة للرمز ---
+    if not bot_data.settings.get('allow_multi_trades_per_symbol', False):
+        has_active = await has_active_trade_for_symbol(signal['symbol'])
+        if has_active:
+            logger.warning(f"Trade for {signal['symbol']} skipped: Already has active/pending trade.")
+            return False
+
     try:
         settings, exchange = bot_data.settings, bot_data.exchange
         base_trade_size = settings['real_trade_size_usdt']
@@ -878,6 +881,13 @@ async def process_signals(signals):
             logger.warning(f"Max concurrent trades reached ({active_trades_count}/{max_concurrent}). Skipping remaining signals.")
             break
 
+        # --- [جديد] التحقق من عدم وجود صفقة نشطة للرمز قبل المعالجة ---
+        if not settings.get('allow_multi_trades_per_symbol', False):
+            has_active = await has_active_trade_for_symbol(signal['symbol'])
+            if has_active:
+                logger.info(f"Signal for {signal['symbol']} skipped: Already has active/pending trade.")
+                continue
+
         success = await initiate_real_trade(signal)
         if success:
             active_trades_count += 1  # [تحصين] حدث العداد فوراً بعد نجاح الإرسال، لمنع تجاوز الحد حتى لو تأخر التأكيد
@@ -907,7 +917,7 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
             return
 
         symbols = [m['symbol'] for m in markets]
-        
+
         queue = asyncio.Queue()
         signals, errors = [], []
 
@@ -1101,7 +1111,7 @@ async def close_trade(trade_id, status, trigger_price):
             trade = dict(trade)
             symbol = trade['symbol']
             quantity = trade['quantity']
-            
+
             logger.info(f"Attempting to close trade #{trade_id} for {symbol} with status '{status}'...")
             sell_order = await bot_data.exchange.create_market_sell_order(symbol, quantity)
 
@@ -1520,6 +1530,7 @@ async def show_parameters_menu(update: Update, context: ContextTypes.DEFAULT_TYP
         [InlineKeyboardButton(f"عدد العملات للفحص: {s['top_n_symbols_by_volume']}", callback_data="param_set_top_n_symbols_by_volume"),
          InlineKeyboardButton(f"أقصى عدد للصفقات: {s['max_concurrent_trades']}", callback_data="param_set_max_concurrent_trades")],
         [InlineKeyboardButton(f"عمال الفحص المتزامنين: {s['worker_threads']}", callback_data="param_set_worker_threads")],
+        [InlineKeyboardButton(bool_format('allow_multi_trades_per_symbol', 'السماح بصفقات متعددة لكل عملة'), callback_data="param_toggle_allow_multi_trades_per_symbol")],
         [InlineKeyboardButton("--- إعدادات المخاطر ---", callback_data="noop")],
         [InlineKeyboardButton(f"حجم الصفقة ($): {s['real_trade_size_usdt']}", callback_data="param_set_real_trade_size_usdt"),
          InlineKeyboardButton(f"مضاعف وقف الخسارة (ATR): {s['atr_sl_multiplier']}", callback_data="param_set_atr_sl_multiplier")],
@@ -1647,7 +1658,7 @@ async def handle_strategy_adjustment(update: Update, context: ContextTypes.DEFAU
             await safe_edit_message(query, f"✅ **تمت الموافقة.** تم تعطيل استراتيجية '{STRATEGY_NAMES_AR.get(scanner_to_disable, scanner_to_disable)}'.", reply_markup=None)
     else:
         await safe_edit_message(query, "❌ **تم الرفض.** لن يتم إجراء أي تغييرات.", reply_markup=None)
-    
+
     bot_data.pending_strategy_proposal = {}
 
 async def handle_parameter_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1795,9 +1806,9 @@ async def post_init(application: Application):
     jq.run_repeating(propose_strategy_changes, interval=STRATEGY_ANALYSIS_INTERVAL_SECONDS, first=120, name="propose_strategy_changes")
 
     logger.info(f"All jobs scheduled. Supervisor running every {SUPERVISOR_INTERVAL_SECONDS}s.")
-    try: await application.bot.send_message(TELEGRAM_CHAT_ID, "*🤖 بوت باينانس V6.3 (نسخة مصححة) - بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
+    try: await application.bot.send_message(TELEGRAM_CHAT_ID, "*🤖 بوت باينانس V6.4 (إصلاح متعدد الصفقات) - بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
     except Forbidden: logger.critical(f"FATAL: Bot not authorized for chat ID {TELEGRAM_CHAT_ID}."); return
-    logger.info("--- Binance Reliability-Enhanced Bot V6.3 is now fully operational ---")
+    logger.info("--- Binance Reliability-Enhanced Bot V6.4 is now fully operational ---")
 
 async def post_shutdown(application: Application):
     if bot_data.exchange: await bot_data.exchange.close()
@@ -1806,17 +1817,17 @@ async def post_shutdown(application: Application):
     logger.info("Bot has shut down gracefully.")
 
 def main():
-    logger.info("Starting Binance Adaptive Bot V6.3...")
+    logger.info("Starting Binance Adaptive Bot V6.4...")
     app_builder = Application.builder().token(TELEGRAM_BOT_TOKEN)
     app_builder.post_init(post_init).post_shutdown(post_shutdown)
     application = app_builder.build()
-    
+
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("scan", manual_scan_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, universal_text_handler))
     application.add_handler(CallbackQueryHandler(button_callback_handler))
-    
+
     application.run_polling()
-    
+
 if __name__ == '__main__':
     main()
