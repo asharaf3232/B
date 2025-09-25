@@ -1805,7 +1805,7 @@ async def post_init(application: Application):
     asyncio.create_task(bot_data.trade_guardian.run_public_ws())
     asyncio.create_task(bot_data.user_data_stream.run())
 
-    logger.info("Waiting 5s for WebSocket connections..."); await asyncio.sleep(5)
+    logger.info("Waiting 10s for WebSocket connections..."); await asyncio.sleep(5)
     await bot_data.trade_guardian.sync_subscriptions() # مزامنة أولية للحارس
 
     jq = application.job_queue
@@ -1841,6 +1841,7 @@ def main():
     
 if __name__ == '__main__':
     main()
+
 
 
 
