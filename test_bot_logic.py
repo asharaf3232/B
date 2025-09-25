@@ -1,4 +1,4 @@
-# test_trading_logic.py (النسخة النهائية الكاملة)
+# test_trading_logic.py (النسخة النهائية الكاملة 100%)
 
 import pytest
 import pytest_asyncio
@@ -14,9 +14,6 @@ from BN import calculate_sl_tp, TradeGuardian, bot_data, close_trade
 # =======================================================================================
 
 def test_calculate_sl_tp_normal_case():
-    """
-    اختبار دالة حساب وقف الخسارة والهدف في الحالة الطبيعية.
-    """
     entry_price = 100.0
     atr = 2.0
     settings = {"atr_sl_multiplier": 2.5, "risk_reward_ratio": 2.0}
@@ -25,9 +22,6 @@ def test_calculate_sl_tp_normal_case():
     assert take_profit == 110.0
 
 def test_calculate_sl_tp_zero_atr():
-    """
-    اختبار حالة خاصة: ماذا لو كان مؤشر ATR يساوي صفراً.
-    """
     entry_price = 50.0
     atr = 0.0
     settings = {"atr_sl_multiplier": 3.0, "risk_reward_ratio": 1.5}
@@ -39,12 +33,8 @@ def test_calculate_sl_tp_zero_atr():
 # --- الجزء الثاني: اختبارات التكامل (Integration Tests) ---
 # =======================================================================================
 
-# استبدل دالة setup_test_environment القديمة بهذه النسخة النهائية
 @pytest_asyncio.fixture
 async def setup_test_environment(mocker, tmp_path):
-    """
-    [النسخة النهائية] هذه الدالة تقوم بإعداد "مختبر" نظيف مع قاعدة بيانات مؤقتة وإعدادات وهمية.
-    """
     test_db_path = tmp_path / "test_db.sqlite"
     
     async with aiosqlite.connect(test_db_path) as db:
@@ -59,15 +49,11 @@ async def setup_test_environment(mocker, tmp_path):
         await db.commit()
     
     mock_exchange = AsyncMock()
+    # محاكاة رد وهمي بسعر إغلاق الصفقة
     mock_exchange.fetch_order.return_value = {'average': 48990.0, 'filled': 0.1}
 
-    # [تعديل مهم] إنشاء كائن وهمي لتطبيق تليجرام
-    mock_application = AsyncMock()
-    bot_data.application = mock_application
-    
     mocker.patch('BN.DB_FILE', str(test_db_path))
     bot_data.exchange = mock_exchange
-    mocker.patch('BN.safe_send_message', return_value=None)
     
     bot_data.settings = {
         "trailing_sl_enabled": True,
@@ -82,18 +68,16 @@ async def setup_test_environment(mocker, tmp_path):
 
 @pytest.mark.asyncio
 async def test_stop_loss_trigger_scenario(setup_test_environment):
-    """
-    سيناريو متكامل: اختبار إغلاق الصفقة عند ضرب وقف الخسارة.
-    """
     test_db_path, mock_exchange = setup_test_environment
     
     async with aiosqlite.connect(test_db_path) as db:
         trade_details = ('BTC/USDT', 50000.0, 52000.0, 49000.0, 0.1, 'active', '123', 50000.0, False, 50000.0)
-        # تعديل جملة الإدخال لتشمل الأعمدة الجديدة الأساسية
         await db.execute("INSERT INTO trades (symbol, entry_price, take_profit, stop_loss, quantity, status, order_id, highest_price, trailing_sl_active, last_profit_notification_price) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", trade_details)
         await db.commit()
     
-    guardian = TradeGuardian(application=None)
+    # [الإصلاح] إنشاء تطبيق تليجرام وهمي لمنع الخطأ
+    mock_application = AsyncMock()
+    guardian = TradeGuardian(application=mock_application)
 
     trigger_price = 48990.0
     await guardian.check_trade_conditions('BTC/USDT', trigger_price)
@@ -104,12 +88,8 @@ async def test_stop_loss_trigger_scenario(setup_test_environment):
         res = await (await db.execute("SELECT status FROM trades WHERE order_id = '123'")).fetchone()
         assert 'فاشلة' in res[0]
 
-
 @pytest.mark.asyncio
 async def test_trailing_stop_loss_scenario(setup_test_environment):
-    """
-    سيناريو متكامل: اختبار الوقف المتحرك (رفع الهدف).
-    """
     test_db_path, mock_exchange = setup_test_environment
     
     async with aiosqlite.connect(test_db_path) as db:
@@ -117,7 +97,9 @@ async def test_trailing_stop_loss_scenario(setup_test_environment):
         await db.execute("INSERT INTO trades (symbol, entry_price, take_profit, stop_loss, quantity, status, order_id, highest_price, trailing_sl_active, last_profit_notification_price) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", trade_details)
         await db.commit()
     
-    guardian = TradeGuardian(application=None)
+    # [الإصلاح] إنشاء تطبيق تليجرام وهمي لمنع الخطأ
+    mock_application = AsyncMock()
+    guardian = TradeGuardian(application=mock_application)
 
     # التنفيذ 1: محاكاة ارتفاع السعر
     activation_price = 3061.0
@@ -130,6 +112,8 @@ async def test_trailing_stop_loss_scenario(setup_test_environment):
 
     # التنفيذ 2: محاكاة هبوط السعر ليضرب الوقف المتحرك
     trailing_trigger_price = 3030.0
+    # نحتاج إلى تعريف `fetch_order` مرة أخرى للسعر الجديد
+    mock_exchange.fetch_order.return_value = {'average': trailing_trigger_price, 'filled': 1.0}
     await guardian.check_trade_conditions('ETH/USDT', trailing_trigger_price)
 
     # التحقق 2: نتأكد من أن أمر البيع تم إرساله
