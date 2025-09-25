@@ -984,6 +984,7 @@ async def the_supervisor_job(context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Supervisor job failed: {e}", exc_info=True)
 
 # --- [محرك مراقبة الأسعار (الحارس)] ---
+# هذا هو الكلاس الكامل بعد تصحيح كل الأخطاء
 class TradeGuardian:
     """الحارس: يراقب أسعار الصفقات النشطة عبر WebSocket عام."""
     def __init__(self, application):
@@ -1001,7 +1002,6 @@ class TradeGuardian:
                 active_symbols_records = await (await conn.execute("SELECT DISTINCT symbol FROM trades WHERE status = 'active'")).fetchall()
                 active_symbols = {row['symbol'].lower().replace('/', '') + '@ticker' for row in active_symbols_records}
 
-
             new_subs = active_symbols - self.subscribed_symbols
             unsubs = self.subscribed_symbols - active_symbols
 
@@ -1016,10 +1016,10 @@ class TradeGuardian:
                 if new_subs or unsubs:
                     self.subscribed_symbols = active_symbols
                     logger.info(f"Guardian: Subscriptions synced. Now monitoring {len(self.subscribed_symbols)} symbols.")
+            
             elif new_subs or unsubs:
                  self.subscribed_symbols = active_symbols # Sync state even if not connected
                  logger.info("Guardian: WS not connected, but symbol list updated for next connection.")
-
 
         except Exception as e:
             logger.error(f"Guardian: Failed to sync subscriptions: {e}", exc_info=True)
@@ -1034,19 +1034,6 @@ class TradeGuardian:
                     logger.info("✅ [Trade Guardian] Public WS connected.")
                     await self.sync_subscriptions()  # مزامنة أولية
 
-  # --- هذا هو الكود الكامل والصحيح للدالة ---
-
-    async def run_public_ws(self):
-        self.is_running = True
-        uri = "wss://stream.binance.com:9443/ws"
-        while self.is_running:
-            try:
-                async with websockets.connect(uri) as ws:
-                    self.ws = ws
-                    logger.info("✅ [Trade Guardian] Public WS connected.")
-                    await self.sync_subscriptions()  # مزامنة أولية
-
-                    # --- هنا تم تطبيق الإصلاح المنطقي والتنسيقي ---
                     async for message in ws:
                         data = json.loads(message)
                         if 'e' in data and data['e'] == '24hrTicker':  # تحديث سعر (ticker)
@@ -1061,15 +1048,14 @@ class TradeGuardian:
                             if market_info:
                                 await self.check_trade_conditions(symbol_ws, current_price)
             
-            # تأكد من أن هذه الـ "except" على نفس مستوى الـ "try" تماماً
             except Exception as e:
                 logger.warning(f"Guardian: Public WS connection lost: {e}. Reconnecting...")
                 self.ws = None
                 await asyncio.sleep(5)
-                
+
     async def check_trade_conditions(self, symbol, current_price):
         async with trade_management_lock:
-        try:
+            try:
                 async with aiosqlite.connect(DB_FILE) as conn:
                     conn.row_factory = aiosqlite.Row
                     trades = await (await conn.execute("SELECT * FROM trades WHERE symbol = ? AND status = 'active'", (symbol.replace('USDT', '/USDT'),))).fetchall()
@@ -1114,7 +1100,7 @@ class TradeGuardian:
         self.is_running = False
         if self.ws:
             await self.ws.close()
-
+            
 async def close_trade(trade_id, status, trigger_price):
     try:
         async with aiosqlite.connect(DB_FILE) as conn:
