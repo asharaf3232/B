@@ -6,17 +6,15 @@
 # هذا الإصدار هو ترقية هيكلية جذرية لبوت Binance، مستوحاة من البنية القوية لبوت OKX.
 # الهدف الرئيسي: زيادة الموثوقية والقضاء على مشاكل فقدان الصفقات والإشعارات.
 #
-# --- سجل التغييرات للإصدار 6.1 (النسخة المصححة) ---
-#   ✅ [إصلاح حاسم] **إصلاح User Data Stream:** تم تصحيح أسماء الدوال المسؤولة عن جلب مفتاح الاستماع،
-#     مما يعيد تفعيل نظام التأكيد الفوري للصفقات ويمنع التأخير.
-#   ✅ [إصلاح حاسم] **إصلاح منطق تجاوز الصفقات:** تم تعديل حلقة فتح الصفقات لتحديث عداد الصفقات النشطة
+# --- سجل التغييرات للإصدار 6.2 (الإصدار المعدل) ---
+#   ✅ [إصلاح حاسم] **إصلاح User Data Stream:** تم استخدام الدوال الصحيحة (publicPostUserDataStream)
+#     لتداول Spot API لضمان عمل نظام التأكيد الفوري للصفقات.
+#   ✅ [تحسين حاسم] **تعزيز استقرار Guardian WS:** تم تحسين معالجة استثناءات WebSocket
+#     لضمان إعادة اتصال سلسة وموثوقة عند فقدان الاتصال.
+#   ✅ [إصلاح منطقي] **إصلاح منطق تجاوز الصفقات:** تم تعديل حلقة فتح الصفقات لتحديث عداد الصفقات النشطة
 #     بعد كل عملية شراء ناجحة، مما يضمن الالتزام بالحد الأقصى المحدد للصفقات.
 #   ✅ [هيكلي] **تطبيق نظام الحالة المزدوجة (Pending/Active):** يتم الآن تسجيل الصفقة كـ 'pending' فور إرسال الأمر،
 #     ولا يتم تفعيلها إلا بعد تأكيد التنفيذ الفعلي من المنصة.
-#   ✅ [هيكلي] **إضافة "المشرف" (The Supervisor):** مهمة دورية للبحث عن الصفقات العالقة في حالة 'pending'
-#     وتصحيح حالتها عبر API، مما يضمن عدم ضياع أي صفقة أبداً.
-#   ✅ [هيكلي] **إضافة "الحارس" (Trade Guardian):** نظام مراقبة أسعار متخصص ومفصول عن منطق الاتصال.
-#   ✅ [تحسين] **تطوير جذري لرسائل المستخدم:** رسائل تأكيد الشراء أصبحت غنية بالتفاصيل الدقيقة.
 #
 # =======================================================================================
 
@@ -689,8 +687,9 @@ class UserDataStreamManager:
 
     async def _get_listen_key(self):
         try:
-            # [إصلاح] استخدام الدالة الصحيحة لـ Spot API
-            self.listen_key = (await self.exchange.private_post_listen_key())['listenKey']
+            # [الإصلاح الحاسم]: استخدام الدالة الصحيحة لـ Spot API
+            # ccxt uses publicPostUserDataStream for spot listen keys
+            self.listen_key = (await self.exchange.publicPostUserDataStream())['listenKey']
             logger.info("User Data Stream: Listen key obtained.")
         except Exception as e:
             logger.error(f"User Data Stream: Failed to get listen key: {e}")
@@ -701,11 +700,13 @@ class UserDataStreamManager:
             await asyncio.sleep(1800) # 30 دقيقة
             if self.listen_key:
                 try:
-                    # [إصلاح] استخدام الدالة الصحيحة لـ Spot API
-                    await self.exchange.private_put_listen_key({'listenKey': self.listen_key})
+                    # [الإصلاح الحاسم]: استخدام الدالة الصحيحة لـ Spot API
+                    # ccxt uses publicPutUserDataStream to renew the key
+                    await self.exchange.publicPutUserDataStream({'listenKey': self.listen_key})
                     logger.info("User Data Stream: Listen key kept alive.")
                 except Exception as e:
                     logger.warning(f"User Data Stream: Failed to keep listen key alive: {e}")
+                    self.listen_key = None # Invalidate key on failure
 
     async def run(self):
         self.is_running = True
@@ -725,9 +726,15 @@ class UserDataStreamManager:
                         data = json.loads(message)
                         if data.get('e') == 'executionReport' and data.get('x') == 'TRADE' and data.get('S') == 'BUY':
                             await self.on_order_update(data)
+            except websockets.exceptions.ConnectionClosedOK:
+                logger.info("User Data Stream: Connection closed gracefully. Stopping.")
+                break
             except (websockets.exceptions.ConnectionClosed, Exception) as e:
-                logger.warning(f"User Data Stream: Connection lost: {e}. Reconnecting...")
-                await asyncio.sleep(5)
+                if self.is_running:
+                    logger.warning(f"User Data Stream: Connection lost: {e}. Reconnecting...")
+                    await asyncio.sleep(5)
+                else:
+                    break # Stop if not running
 
     async def stop(self):
         self.is_running = False
@@ -825,7 +832,8 @@ async def initiate_real_trade(signal):
         usdt_balance = balance.get('USDT', {}).get('free', 0.0)
 
         if usdt_balance < trade_size:
-            logger.error(f"Insufficient USDT for {signal['symbol']}. Have: {usdt_balance}, Need: {trade_size}"); return False
+            # رسالة خطأ محدثة لتوضيح الحاجة والرصيد المتوفر
+            logger.error(f"Insufficient USDT for {signal['symbol']}. Have: {usdt_balance:,.2f}, Need: {trade_size:,.2f}"); return False
 
         base_amount = trade_size / signal['entry_price']
         formatted_amount = exchange.amount_to_precision(signal['symbol'], base_amount)
@@ -943,6 +951,7 @@ class TradeGuardian:
                     trade = dict(trade); settings = bot_data.settings
 
                     if settings['trailing_sl_enabled']:
+                        # --- Trailing SL Logic ---
                         highest_price = max(trade.get('highest_price', 0), current_price)
                         if highest_price > trade.get('highest_price', 0):
                             await conn.execute("UPDATE trades SET highest_price = ? WHERE id = ?", (highest_price, trade['id']))
@@ -960,6 +969,7 @@ class TradeGuardian:
                                 await conn.execute("UPDATE trades SET stop_loss = ? WHERE id = ?", (new_sl, trade['id']))
 
                     if settings.get('incremental_notifications_enabled', True):
+                        # --- Incremental Notification Logic ---
                         last_notified = trade.get('last_profit_notification_price', trade['entry_price'])
                         increment = settings['incremental_notification_percent'] / 100
                         if current_price >= last_notified * (1 + increment):
@@ -969,6 +979,7 @@ class TradeGuardian:
                     
                     await conn.commit()
 
+                # --- Exit Logic ---
                 if current_price >= trade['take_profit']: await self._close_trade(trade, "ناجحة (TP)", current_price)
                 elif current_price <= trade['stop_loss']:
                     reason = "فاشلة (SL)"
@@ -985,8 +996,10 @@ class TradeGuardian:
 
         for i in range(bot_data.settings.get('close_retries', 3)):
             try:
+                # محاولة البيع
                 await bot_data.exchange.create_market_sell_order(symbol, trade['quantity'])
 
+                # إذا نجح البيع
                 pnl = (close_price - trade['entry_price']) * trade['quantity']
                 pnl_percent = (close_price / trade['entry_price'] - 1) * 100 if trade['entry_price'] > 0 else 0
                 emoji = "✅" if pnl > 0 else "🛑"
@@ -999,6 +1012,9 @@ class TradeGuardian:
                 await safe_send_message(bot, f"{emoji} **تم إغلاق الصفقة | #{trade_id} {symbol}**\n**السبب:** {reason}\n**الربح/الخسارة:** `${pnl:,.2f}` ({pnl_percent:+.2f}%)")
                 return
 
+            except ccxt.InsufficientFunds as e:
+                logger.warning(f"Failed to close trade #{trade_id} due to Insufficient Funds. Trade might be partially or fully closed already. ({i + 1}/{bot_data.settings.get('close_retries', 3)})", exc_info=True)
+                await asyncio.sleep(5)
             except Exception as e:
                 logger.warning(f"Failed to close trade #{trade_id}. Retrying... ({i + 1}/{bot_data.settings.get('close_retries', 3)})", exc_info=True)
                 await asyncio.sleep(5)
@@ -1017,6 +1033,7 @@ class TradeGuardian:
             if not stream_name:
                 await asyncio.sleep(5); continue
 
+            # Binance Public WS Endpoint (Spot)
             uri = f"wss://stream.binance.com:9443/ws/{stream_name}"
             try:
                 async with websockets.connect(uri) as ws:
@@ -1024,10 +1041,14 @@ class TradeGuardian:
                     logger.info(f"✅ [Guardian's Eyes] Connected. Watching {len(self.subscriptions)} symbols.")
                     async for message in ws:
                         await self.handle_ticker_update(message)
-            except Exception as e:
+            except websockets.exceptions.ConnectionClosedOK:
+                logger.info("Guardian's Eyes: Connection closed gracefully.")
+            except (websockets.exceptions.ConnectionClosed, Exception) as e:
                 if self.is_running:
                     logger.warning(f"Guardian's Eyes: Connection lost: {e}. Reconnecting...")
                     await asyncio.sleep(5)
+                else:
+                    break # Stop if bot is manually stopping
 
     async def sync_subscriptions(self):
         """تضمن أن الحارس يراقب فقط الصفقات النشطة."""
@@ -1037,8 +1058,13 @@ class TradeGuardian:
         if active_symbols != self.subscriptions:
             logger.info(f"Guardian: Syncing subscriptions. Old: {len(self.subscriptions)}, New: {len(active_symbols)}")
             self.subscriptions = active_symbols
+            # إذا كان الاتصال موجوداً ومفتوحاً، أغلقه لإعادة الاتصال مع الاشتراكات الجديدة
             if self.public_ws and not self.public_ws.closed:
-                await self.public_ws.close()
+                try:
+                    # إغلاق أنيق
+                    await self.public_ws.close(code=1000, reason='Subscription change')
+                except Exception as e:
+                    logger.warning(f"Error closing Guardian WS for sync: {e}")
 
     async def stop(self):
         self.is_running = False
@@ -1379,6 +1405,16 @@ async def show_diagnostics_command(update: Update, context: ContextTypes.DEFAULT
     async with aiosqlite.connect(DB_FILE) as conn:
         total_trades = (await (await conn.execute("SELECT COUNT(*) FROM trades")).fetchone())[0]
         active_trades = (await (await conn.execute("SELECT COUNT(*) FROM trades WHERE status = 'active'")).fetchone())[0]
+    
+    # Check WS connection status
+    guardian_ws_status = "متصل ✅"
+    if bot_data.trade_guardian is None or bot_data.trade_guardian.public_ws is None or bot_data.trade_guardian.public_ws.closed:
+        guardian_ws_status = "غير متصل ❌"
+    
+    uds_ws_status = "متصل ✅"
+    if bot_data.user_data_stream is None or bot_data.user_data_stream.ws is None or bot_data.user_data_stream.ws.closed:
+        uds_ws_status = "غير متصل ❌"
+        
     report = (
         f"🕵️‍♂️ *تقرير التشخيص الشامل*\n\n"
         f"تم إنشاؤه في: {datetime.now(EGYPT_TZ).strftime('%Y-%m-%d %H:%M:%S')}\n"
@@ -1396,7 +1432,8 @@ async def show_diagnostics_command(update: Update, context: ContextTypes.DEFAULT
         f"----------------------------------\n"
         f"🔩 **حالة العمليات الداخلية**\n"
         f"- فحص العملات: يعمل, التالي في: {next_scan_time}\n"
-        f"- الاتصال بـ Binance: متصل ✅\n"
+        f"- اتصال Binance WS (Guardian): {guardian_ws_status}\n"
+        f"- اتصال Binance WS (UDS): {uds_ws_status}\n"
         f"- قاعدة البيانات:\n"
         f"  - الاتصال: ناجح ✅\n"
         f"  - حجم الملف: {db_size}\n"
@@ -1728,9 +1765,9 @@ async def post_init(application: Application):
     jq.run_repeating(propose_strategy_changes, interval=STRATEGY_ANALYSIS_INTERVAL_SECONDS, first=120, name="propose_strategy_changes")
 
     logger.info(f"All jobs scheduled. Supervisor running every {SUPERVISOR_INTERVAL_SECONDS}s.")
-    try: await application.bot.send_message(TELEGRAM_CHAT_ID, "*🤖 بوت باينانس V6.1 (إصدار مصحح) - بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
+    try: await application.bot.send_message(TELEGRAM_CHAT_ID, "*🤖 بوت باينانس V6.2 (إصدار مصحح ومستقر) - بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
     except Forbidden: logger.critical(f"FATAL: Bot not authorized for chat ID {TELEGRAM_CHAT_ID}."); return
-    logger.info("--- Binance Reliability-Enhanced Bot V6.1 is now fully operational ---")
+    logger.info("--- Binance Reliability-Enhanced Bot V6.2 is now fully operational ---")
 
 async def post_shutdown(application: Application):
     if bot_data.exchange: await bot_data.exchange.close()
