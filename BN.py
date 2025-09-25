@@ -1002,7 +1002,6 @@ async def the_supervisor_job(context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Supervisor job failed: {e}", exc_info=True)
 
 # --- [محرك مراقبة الأسعار (الحارس)] ---
-# هذا هو الكلاس الكامل بعد تصحيح كل الأخطاء المنطقية والتنسيقية
 class TradeGuardian:
     """الحارس: يراقب أسعار الصفقات النشطة عبر WebSocket عام."""
     def __init__(self, application):
@@ -1068,7 +1067,97 @@ class TradeGuardian:
                 self.ws = None
                 await asyncio.sleep(5)
 
-   async def check_trade_conditions
+    async def check_trade_conditions(self, symbol, current_price):
+        async with trade_management_lock:
+            try:
+                async with aiosqlite.connect(DB_FILE) as conn:
+                    conn.row_factory = aiosqlite.Row
+                    trades_rows = await (await conn.execute("SELECT * FROM trades WHERE symbol = ? AND status = 'active'", (symbol,))).fetchall()
+
+                    for trade_row in trades_rows:
+                        trade = dict(trade_row)
+                        
+                        if current_price <= trade['stop_loss']:
+                            await close_trade(trade['id'], 'فاشلة (وقف الخسارة)', current_price, conn)
+                            continue 
+                        elif current_price >= trade['take_profit']:
+                            await close_trade(trade['id'], 'ناجحة (الهدف)', current_price, conn)
+                            continue
+
+                        if bot_data.settings['trailing_sl_enabled'] and current_price > trade['highest_price']:
+                            await conn.execute("UPDATE trades SET highest_price = ? WHERE id = ?", (current_price, trade['id']))
+                            
+                            if not trade['trailing_sl_active'] and (current_price - trade['entry_price']) / trade['entry_price'] * 100 >= bot_data.settings['trailing_sl_activation_percent']:
+                                 await conn.execute("UPDATE trades SET trailing_sl_active = 1 WHERE id = ?", (trade['id'],))
+                                 logger.info(f"Trailing SL activated for {symbol} at price {current_price}")
+                                 trade['trailing_sl_active'] = True
+
+                            if trade['trailing_sl_active']:
+                                new_sl = current_price * (1 - bot_data.settings['trailing_sl_callback_percent'] / 100)
+                                if new_sl > trade['stop_loss']:
+                                    await conn.execute("UPDATE trades SET stop_loss = ? WHERE id = ?", (new_sl, trade['id']))
+                                    logger.info(f"Trailing SL updated for {symbol} to {new_sl}")
+                            
+                            await conn.commit()
+
+                        if bot_data.settings['incremental_notifications_enabled'] and current_price > trade['last_profit_notification_price']:
+                            profit_since_last_notify = (current_price / trade['last_profit_notification_price'] - 1) * 100
+                            if profit_since_last_notify >= bot_data.settings['incremental_notification_percent']:
+                                 pnl_percent = (current_price / trade['entry_price'] - 1) * 100
+                                 await safe_send_message(self.application.bot, f"📈 **تحديث ربح | {symbol}**\nالربح الحالي: +{pnl_percent:.2f}%")
+                                 await conn.execute("UPDATE trades SET last_profit_notification_price = ? WHERE id = ?", (current_price, trade['id']))
+                                 await conn.commit()
+            
+            except Exception as e:
+                logger.error(f"Guardian: Failed to check conditions for {symbol}: {e}", exc_info=True)
+
+    async def stop(self):
+        self.is_running = False
+        if self.ws:
+            await self.ws.close()
+
+async def close_trade(trade_id, status, trigger_price, conn):
+    try:
+        trade = await (await conn.execute("SELECT * FROM trades WHERE id = ? AND status = 'active'", (trade_id,))).fetchone()
+        if not trade:
+            logger.warning(f"Close requested for trade #{trade_id}, but it's not active or does not exist.")
+            return
+
+        trade = dict(trade)
+        symbol = trade['symbol']
+        quantity = trade['quantity']
+
+        logger.info(f"Attempting to close trade #{trade_id} for {symbol} with status '{status}'...")
+        sell_order = await bot_data.exchange.create_market_sell_order(symbol, quantity)
+
+        actual_close_price = trigger_price
+        try:
+            await asyncio.sleep(1.5)
+            order_details = await bot_data.exchange.fetch_order(sell_order['id'], symbol)
+            if order_details and order_details.get('average'):
+                actual_close_price = float(order_details['average'])
+                logger.info(f"Trade #{trade_id} closed at actual average price: {actual_close_price}")
+            else:
+                logger.warning(f"Could not find average price for closed order #{sell_order['id']}. Using trigger price.")
+        except Exception as fetch_e:
+            logger.warning(f"Could not fetch final order details for trade #{trade_id}: {fetch_e}. Using trigger price for PnL.")
+
+        pnl_usdt = (actual_close_price - trade['entry_price']) * quantity
+
+        await conn.execute(
+            "UPDATE trades SET status = ?, close_price = ?, pnl_usdt = ? WHERE id = ?",
+            (status, actual_close_price, pnl_usdt, trade_id)
+        )
+        await conn.commit()
+        logger.info(f"Trade #{trade_id} for {symbol} successfully marked as closed in DB.")
+
+        message = f"🛑 **إغلاق صفقة | {symbol}**\nالحالة: {status}\nالربح/الخسارة: `${pnl_usdt:+.2f}`"
+        await safe_send_message(bot_data.application.bot, message)
+
+        await bot_data.trade_guardian.sync_subscriptions()
+
+    except Exception as e:
+        logger.error(f"CRITICAL: Failed to close trade #{trade_id}: {e}", exc_info=True)
         # In a real failure, a retry mechanism using the 'close_retries' DB field would be implemented here.
 
 # --- لوحة التحكم والأوامر ---
