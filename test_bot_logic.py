@@ -49,22 +49,23 @@ async def setup_test_environment(mocker, tmp_path):
         await db.commit()
     
     mock_exchange = AsyncMock()
-    # محاكاة رد وهمي بسعر إغلاق الصفقة
     mock_exchange.fetch_order.return_value = {'average': 48990.0, 'filled': 0.1}
 
     mocker.patch('BN.DB_FILE', str(test_db_path))
     bot_data.exchange = mock_exchange
+    mocker.patch('BN.safe_send_message', return_value=None)
     
     bot_data.settings = {
         "trailing_sl_enabled": True,
         "trailing_sl_activation_percent": 1.5,
         "trailing_sl_callback_percent": 1.0,
-        "incremental_notifications_enabled": True,
+        "incremental_notifications_enabled": False, # يتم تعطيله للتركيز على الاختبار
         "incremental_notification_percent": 2.0,
         "risk_reward_ratio": 2.0
     }
     
     yield test_db_path, mock_exchange
+
 
 @pytest.mark.asyncio
 async def test_stop_loss_trigger_scenario(setup_test_environment):
@@ -75,7 +76,6 @@ async def test_stop_loss_trigger_scenario(setup_test_environment):
         await db.execute("INSERT INTO trades (symbol, entry_price, take_profit, stop_loss, quantity, status, order_id, highest_price, trailing_sl_active, last_profit_notification_price) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", trade_details)
         await db.commit()
     
-    # [الإصلاح] إنشاء تطبيق تليجرام وهمي لمنع الخطأ
     mock_application = AsyncMock()
     guardian = TradeGuardian(application=mock_application)
 
@@ -88,17 +88,10 @@ async def test_stop_loss_trigger_scenario(setup_test_environment):
         res = await (await db.execute("SELECT status FROM trades WHERE order_id = '123'")).fetchone()
         assert 'فاشلة' in res[0]
 
-# استبدل دالة اختبار الوقف المتحرك القديمة بهذه النسخة النهائية
+
 @pytest.mark.asyncio
 async def test_trailing_stop_loss_scenario(setup_test_environment):
-    """
-    سيناريو متكامل: اختبار الوقف المتحرك (رفع الهدف).
-    """
     test_db_path, mock_exchange = setup_test_environment
-    
-    # --- الإعداد ---
-    # [تعديل] تعطيل إشعارات الربح مؤقتاً للتركيز على اختبار الوقف المتحرك فقط
-    bot_data.settings['incremental_notifications_enabled'] = False
     
     async with aiosqlite.connect(test_db_path) as db:
         trade_details = ('ETH/USDT', 3000.0, 3200.0, 2950.0, 1.0, 'active', '456', 3000.0, False, 3000.0)
@@ -108,20 +101,21 @@ async def test_trailing_stop_loss_scenario(setup_test_environment):
     mock_application = AsyncMock()
     guardian = TradeGuardian(application=mock_application)
 
-    # --- التنفيذ 1: محاكاة ارتفاع السعر ---
-    activation_price = 3061.0
+    # التنفيذ 1: محاكاة ارتفاع السعر لتفعيل الوقف المتحرك
+    activation_price = 3061.0 # (أعلى من 1.5% ربح)
     await guardian.check_trade_conditions('ETH/USDT', activation_price)
     
-    # --- التحقق 1: نتأكد من أن وقف الخسارة ارتفع ---
+    # التحقق 1: نتأكد من أن الوقف تفعل وأن قيمته ارتفعت
     async with aiosqlite.connect(test_db_path) as db:
-        res = await (await db.execute("SELECT stop_loss FROM trades WHERE order_id = '456'")).fetchone()
-        # التأكد من أن القيمة قريبة جداً من المتوقع لتجنب أخطاء التقريب
-        assert abs(res[0] - 3030.39) < 0.001
+        res = await (await db.execute("SELECT stop_loss, trailing_sl_active FROM trades WHERE order_id = '456'")).fetchone()
+        new_stop_loss, is_trailing_active = res
+        assert is_trailing_active is True # التأكد من أن الوقف تم تفعيله
+        assert abs(new_stop_loss - 3030.39) < 0.001 # التأكد من أن القيمة ارتفعت
 
-    # --- التنفيذ 2: محاكاة هبوط السعر ليضرب الوقف المتحرك ---
+    # التنفيذ 2: محاكاة هبوط السعر ليضرب الوقف المتحرك
     trailing_trigger_price = 3030.0
     mock_exchange.fetch_order.return_value = {'average': trailing_trigger_price, 'filled': 1.0}
     await guardian.check_trade_conditions('ETH/USDT', trailing_trigger_price)
 
-    # --- التحقق 2: نتأكد من أن أمر البيع تم إرساله ---
+    # التحقق 2: نتأكد من أن أمر البيع تم إرساله
     mock_exchange.create_market_sell_order.assert_called_once_with('ETH/USDT', 1.0)
