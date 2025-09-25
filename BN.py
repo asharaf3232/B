@@ -770,7 +770,7 @@ class UserDataStreamManager:
 
 async def handle_order_update(order_data):
     """يتم استدعاؤها عند ورود تحديث لأمر من مراسل البيانات."""
-    if order_data['X'] == 'FILLED' and order_data['S'] == 'BUY':
+      if order_data['X'] == 'FILLED' and order_data['S'] == 'BUY':
         logger.info(f"Fast Reporter: Received fill for order {order_data['i']}. Activating trade...")
         await activate_trade(order_data['i'], order_data['s'].replace('USDT', '/USDT'))
 
