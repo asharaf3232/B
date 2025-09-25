@@ -864,6 +864,31 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
         logger.info("--- Starting new Reliability-Enhanced scan... ---")
         settings, bot = bot_data.settings, context.bot
 
+        # =================================================================
+        # [تعديل V6.2.1]: التحقق من الرصيد قبل البدء بالمسح المكلف
+        # يوقف البوت عن البحث إذا كان الرصيد لا يكفي حتى لجزء من الصفقة.
+        # =================================================================
+        try:
+            balance = await bot_data.exchange.fetch_balance()
+            usdt_balance = balance.get('USDT', {}).get('free', 0.0)
+            # نستخدم 80% من حجم الصفقة المطلوب كحد أدنى للبدء بالمسح لتجنب البحث غير الضروري
+            trade_size_min_check = settings['real_trade_size_usdt'] * 0.8 
+
+            if usdt_balance < trade_size_min_check:
+                logger.error(f"Scan skipped: Insufficient USDT balance ({usdt_balance:,.2f} < {trade_size_min_check:,.2f}) to open a trade.")
+                await safe_send_message(bot, 
+                    f"🚨 **تم إيقاف فحص السوق!**\n"
+                    f"**السبب:** نقص الرصيد لفتح صفقة واحدة على الأقل.\n"
+                    f"**المتاح:** `${usdt_balance:,.2f}` | **المطلوب:** `${trade_size_min_check:,.2f}`.\n"
+                    f"يرجى تمويل الحساب لاستئناف التداول."
+                )
+                return # ينهي الدالة هنا
+        except Exception as e:
+            logger.error(f"Failed to fetch balance for scan check: {e}"); return
+        # =================================================================
+        # [نهاية تعديل V6.2.1]
+        # =================================================================
+
         if settings.get('news_filter_enabled', True):
             mood_result_fundamental = await get_fundamental_market_mood()
             if mood_result_fundamental['mood'] in ["NEGATIVE", "DANGEROUS"]:
@@ -1790,3 +1815,4 @@ def main():
     
 if __name__ == '__main__':
     main()
+
