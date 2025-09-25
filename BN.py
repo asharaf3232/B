@@ -1058,7 +1058,7 @@ async for message in ws:
 
     async def check_trade_conditions(self, symbol, current_price):
         async with trade_management_lock:
-            try:
+        try:
                 async with aiosqlite.connect(DB_FILE) as conn:
                     conn.row_factory = aiosqlite.Row
                     trades = await (await conn.execute("SELECT * FROM trades WHERE symbol = ? AND status = 'active'", (symbol.replace('USDT', '/USDT'),))).fetchall()
