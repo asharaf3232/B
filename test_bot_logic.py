@@ -39,21 +39,29 @@ def test_calculate_sl_tp_zero_atr():
 # --- الجزء الثاني: اختبارات التكامل (Integration Tests) ---
 # =======================================================================================
 
-@pytest_asyncio.fixture # <-- تم تعديل هذا السطر
+# استبدل دالة setup_test_environment القديمة بهذه النسخة المعدلة
+@pytest_asyncio.fixture
 async def setup_test_environment(mocker):
     """
-    هذه الدالة الخاصة تقوم بإعداد "مختبر" نظيف ومعزول لكل اختبار تكاملي.
+    هذه الدالة تقوم بإعداد "مختبر" نظيف ومعزول لكل اختبار تكاملي.
     """
+    # 1. إنشاء قاعدة بيانات مؤقتة ومجهزة في الذاكرة
     db_conn = await aiosqlite.connect(":memory:")
     await db_conn.execute('CREATE TABLE trades (id INTEGER PRIMARY KEY, symbol TEXT, entry_price REAL, take_profit REAL, stop_loss REAL, quantity REAL, status TEXT, order_id TEXT, highest_price REAL, trailing_sl_active BOOLEAN, last_profit_notification_price REAL)')
+    await db_conn.commit() # تأكيد إنشاء الجدول
     
+    # 2. إنشاء محاكي وهمي للمنصة
     mock_exchange = AsyncMock()
     
-    mocker.patch('BN.DB_FILE', ":memory:")
+    # 3. "خداع" البوت باستخدام المكونات الوهمية
+    # [تعديل مهم] نخبر أي استدعاء لـ aiosqlite.connect أن يستخدم قاعدتنا المجهزة
+    mocker.patch('aiosqlite.connect', return_value=db_conn)
     bot_data.exchange = mock_exchange
     
+    # "تسليم" المختبر لدالة الاختبار
     yield db_conn, mock_exchange
     
+    # 4. تنظيف المختبر بعد انتهاء الاختبار
     await db_conn.close()
 
 
