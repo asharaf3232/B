@@ -975,6 +975,7 @@ class TradeGuardian:
 
                     trade = dict(trade); settings = bot_data.settings
 
+                    # [منطق الوقف المتحرك ورفع الوقف]
                     if settings['trailing_sl_enabled']:
                         # --- Trailing SL Logic ---
                         highest_price = max(trade.get('highest_price', 0), current_price)
@@ -993,6 +994,7 @@ class TradeGuardian:
                                 trade['stop_loss'] = new_sl
                                 await conn.execute("UPDATE trades SET stop_loss = ? WHERE id = ?", (new_sl, trade['id']))
 
+                    # [منطق إشعارات الربح المتزايدة]
                     if settings.get('incremental_notifications_enabled', True):
                         # --- Incremental Notification Logic ---
                         last_notified = trade.get('last_profit_notification_price', trade['entry_price'])
@@ -1004,7 +1006,7 @@ class TradeGuardian:
                     
                     await conn.commit()
 
-                # --- Exit Logic ---
+                # --- Exit Logic (يجب أن تكون خارج كتلة aiosqlite.connect للتشغيل الصحيح) ---
                 if current_price >= trade['take_profit']: await self._close_trade(trade, "ناجحة (TP)", current_price)
                 elif current_price <= trade['stop_loss']:
                     reason = "فاشلة (SL)"
@@ -1013,7 +1015,26 @@ class TradeGuardian:
 
             except Exception as e:
                 logger.error(f"Guardian Ticker Error for {symbol}: {e}", exc_info=True)
-
+                
+    # =======================================================================================
+    # [تعديل جديد V6.3]: دالة مساعدة للاختبار
+    # هذه الدالة تجعل منطق handle_ticker_update قابلاً للاستدعاء مباشرة للاختبارات الخارجية
+    # =======================================================================================
+    async def check_trade_conditions(self, symbol, current_price):
+        """دالة مساعدة مخصصة للاختبارات المتقدمة (مثل Pytest)."""
+        # بناء هيكل رسالة WebSocket مطابق للمتوقع
+        mock_data = {
+            's': symbol.replace('/USDT', 'USDT'),
+            'c': str(current_price)
+        }
+        mock_message = json.dumps(mock_data)
+        
+        # استدعاء دالة معالجة التحديث الأساسية
+        await self.handle_ticker_update(mock_message)
+    # =======================================================================================
+    # [نهاية التعديل V6.3]
+    # =======================================================================================
+    
     async def _close_trade(self, trade, reason, close_price):
         symbol, trade_id = trade['symbol'], trade['id']
         bot = self.application.bot
@@ -1820,6 +1841,7 @@ def main():
     
 if __name__ == '__main__':
     main()
+
 
 
 
