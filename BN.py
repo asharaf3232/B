@@ -58,11 +58,27 @@ from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKe
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters, CallbackQueryHandler
 from telegram.constants import ParseMode
 from telegram.error import BadRequest, TimedOut, Forbidden
+# ...آخر سطر في قسم import
+
+# >>>>>>>>>>>> الصق الدالة هنا <<<<<<<<<<<<
+
+def calculate_sl_tp(entry_price, atr, settings):
+    """دالة مستقلة لحساب وقف الخسارة وجني الأرباح."""
+    atr_sl_multiplier = settings.get("atr_sl_multiplier", 2.5)
+    risk_reward_ratio = settings.get("risk_reward_ratio", 2.0)
+    
+    risk = atr * atr_sl_multiplier
+    stop_loss = entry_price - risk
+    take_profit = entry_price + (risk * risk_reward_ratio)
+    
+    return stop_loss, take_profit
 
 # --- إعدادات أساسية ---
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# ...يستمر باقي الكود من هنا
+# --- إعدادات أساسية ---
 # --- جلب المتغيرات من بيئة التشغيل ---
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
