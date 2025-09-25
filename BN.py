@@ -1072,45 +1072,55 @@ class TradeGuardian:
                 self.ws = None
                 await asyncio.sleep(5)
 
-    async def check_trade_conditions(self, symbol, current_price):
-        async with trade_management_lock:
-            try:
-                async with aiosqlite.connect(DB_FILE) as conn:
-                    conn.row_factory = aiosqlite.Row
-                    trades = await (await conn.execute("SELECT * FROM trades WHERE symbol = ? AND status = 'active'", (symbol,))).fetchall()
+    # استبدل الدالة القديمة في ملف BN.py بهذه النسخة الصحيحة
+async def check_trade_conditions(self, symbol, current_price):
+    async with trade_management_lock:
+        try:
+            async with aiosqlite.connect(DB_FILE) as conn:
+                conn.row_factory = aiosqlite.Row
+                trades = await (await conn.execute("SELECT * FROM trades WHERE symbol = ? AND status = 'active'", (symbol,))).fetchall()
 
-                    for trade in trades:
-                        trade = dict(trade)
-                        if current_price <= trade['stop_loss']:
-                            await close_trade(trade['id'], 'فاشلة (وقف الخسارة)', current_price)
-                        elif current_price >= trade['take_profit']:
-                            await close_trade(trade['id'], 'ناجحة (الهدف)', current_price)
+            for trade_row in trades:
+                trade = dict(trade_row) # نعمل على نسخة من البيانات
+                
+                # تحقق الوقف أو الهدف أولاً
+                if current_price <= trade['stop_loss']:
+                    await close_trade(trade['id'], 'فاشلة (وقف الخسارة)', current_price)
+                    continue # ننتقل للصفقة التالية لأن هذه أغلقت
+                elif current_price >= trade['take_profit']:
+                    await close_trade(trade['id'], 'ناجحة (الهدف)', current_price)
+                    continue # ننتقل للصفقة التالية
 
-                        if bot_data.settings['trailing_sl_enabled'] and current_price > trade['highest_price']:
-                            await conn.execute("UPDATE trades SET highest_price = ? WHERE id = ?", (current_price, trade['id']))
+                # الوقف المتحرك
+                if bot_data.settings['trailing_sl_enabled'] and current_price > trade['highest_price']:
+                    await conn.execute("UPDATE trades SET highest_price = ? WHERE id = ?", (current_price, trade['id']))
+                    await conn.commit()
+                    
+                    if not trade['trailing_sl_active'] and (current_price - trade['entry_price']) / trade['entry_price'] * 100 >= bot_data.settings['trailing_sl_activation_percent']:
+                         await conn.execute("UPDATE trades SET trailing_sl_active = 1 WHERE id = ?", (trade['id'],))
+                         await conn.commit()
+                         logger.info(f"Trailing SL activated for {symbol} at price {current_price}")
+                         # [الإصلاح الحاسم] نقوم بتحديث الحالة في متغيرنا المحلي فوراً
+                         trade['trailing_sl_active'] = True
+
+                    if trade['trailing_sl_active']:
+                        new_sl = current_price * (1 - bot_data.settings['trailing_sl_callback_percent'] / 100)
+                        if new_sl > trade['stop_loss']:
+                            await conn.execute("UPDATE trades SET stop_loss = ? WHERE id = ?", (new_sl, trade['id']))
                             await conn.commit()
-                            if not trade['trailing_sl_active'] and (current_price - trade['entry_price']) / trade['entry_price'] * 100 >= bot_data.settings['trailing_sl_activation_percent']:
-                                 await conn.execute("UPDATE trades SET trailing_sl_active = 1 WHERE id = ?", (trade['id'],))
-                                 await conn.commit()
-                                 logger.info(f"Trailing SL activated for {symbol} at price {current_price}")
+                            logger.info(f"Trailing SL updated for {symbol} to {new_sl}")
 
-                            if trade['trailing_sl_active']:
-                                new_sl = current_price * (1 - bot_data.settings['trailing_sl_callback_percent'] / 100)
-                                if new_sl > trade['stop_loss']:
-                                    await conn.execute("UPDATE trades SET stop_loss = ? WHERE id = ?", (new_sl, trade['id']))
-                                    await conn.commit()
-                                    logger.info(f"Trailing SL updated for {symbol} to {new_sl}")
+                # إشعارات الربح المتزايدة
+                if bot_data.settings['incremental_notifications_enabled'] and current_price > trade['last_profit_notification_price']:
+                    profit_since_last_notify = (current_price / trade['last_profit_notification_price'] - 1) * 100
+                    if profit_since_last_notify >= bot_data.settings['incremental_notification_percent']:
+                         pnl_percent = (current_price / trade['entry_price'] - 1) * 100
+                         await safe_send_message(self.application.bot, f"📈 **تحديث ربح | {symbol}**\nالربح الحالي: +{pnl_percent:.2f}%")
+                         await conn.execute("UPDATE trades SET last_profit_notification_price = ? WHERE id = ?", (current_price, trade['id']))
+                         await conn.commit()
 
-                        if bot_data.settings['incremental_notifications_enabled'] and current_price > trade['last_profit_notification_price']:
-                            profit_since_last_notify = (current_price / trade['last_profit_notification_price'] - 1) * 100
-                            if profit_since_last_notify >= bot_data.settings['incremental_notification_percent']:
-                                 pnl_percent = (current_price / trade['entry_price'] - 1) * 100
-                                 await safe_send_message(self.application.bot, f"📈 **تحديث ربح | {symbol}**\nالربح الحالي: +{pnl_percent:.2f}%")
-                                 await conn.execute("UPDATE trades SET last_profit_notification_price = ? WHERE id = ?", (current_price, trade['id']))
-                                 await conn.commit()
-
-            except Exception as e:
-                logger.error(f"Guardian: Failed to check conditions for {symbol}: {e}", exc_info=True)
+        except Exception as e:
+            logger.error(f"Guardian: Failed to check conditions for {symbol}: {e}", exc_info=True)
 
     async def stop(self):
         self.is_running = False
