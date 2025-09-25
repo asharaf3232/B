@@ -1034,11 +1034,11 @@ class TradeGuardian:
                     logger.info("✅ [Trade Guardian] Public WS connected.")
                     await self.sync_subscriptions()  # مزامنة أولية
 
-                    # --- الكود الجديد (الصحيح) ---
+           # --- الكود الجديد (الصحيح) ---
 async for message in ws:
     data = json.loads(message)
     if 'e' in data and data['e'] == '24hrTicker':  # تحديث سعر (ticker)
-        symbol_ws = data['s'] # e.g. 'HEMIUSDT'
+        symbol_ws = data['s']  # e.g. 'HEMIUSDT'
         current_price = float(data['c'])
         self.price_cache[symbol_ws] = current_price
 
