@@ -1034,28 +1034,39 @@ class TradeGuardian:
                     logger.info("✅ [Trade Guardian] Public WS connected.")
                     await self.sync_subscriptions()  # مزامنة أولية
 
-           # --- الكود الجديد (الصحيح) ---
-async for message in ws:
-    data = json.loads(message)
-    if 'e' in data and data['e'] == '24hrTicker':  # تحديث سعر (ticker)
-        symbol_ws = data['s']  # e.g. 'HEMIUSDT'
-        current_price = float(data['c'])
-        self.price_cache[symbol_ws] = current_price
+  # --- هذا هو الكود الكامل والصحيح للدالة ---
 
-        # [إصلاح حاسم] التحقق من أن العملة المحدثة هي من ضمن العملات التي نراقبها
-        # يتم البحث في قائمة القواميس بشكل صحيح عن مفتاح 'symbol'
-        market_info = next((market for market in bot_data.all_markets if market.get('symbol', '').replace('/', '') == symbol_ws), None)
+    async def run_public_ws(self):
+        self.is_running = True
+        uri = "wss://stream.binance.com:9443/ws"
+        while self.is_running:
+            try:
+                async with websockets.connect(uri) as ws:
+                    self.ws = ws
+                    logger.info("✅ [Trade Guardian] Public WS connected.")
+                    await self.sync_subscriptions()  # مزامنة أولية
 
-        # إذا كانت العملة معروفة، يتم فحص شروط وقف الخسارة والهدف
-        if market_info:
-            # نمرر رمز العملة كما هو من WebSocket (e.g. 'HEMIUSDT')
-            # الدالة التالية ستقوم بتحويله إلى الصيغة الصحيحة لقاعدة البيانات
-            await self.check_trade_conditions(symbol_ws, current_price)
+                    # --- هنا تم تطبيق الإصلاح المنطقي والتنسيقي ---
+                    async for message in ws:
+                        data = json.loads(message)
+                        if 'e' in data and data['e'] == '24hrTicker':  # تحديث سعر (ticker)
+                            symbol_ws = data['s']  # e.g. 'HEMIUSDT'
+                            current_price = float(data['c'])
+                            self.price_cache[symbol_ws] = current_price
+
+                            # [إصلاح حاسم] التحقق من أن العملة المحدثة هي من ضمن العملات التي نراقبها
+                            market_info = next((market for market in bot_data.all_markets if market.get('symbol', '').replace('/', '') == symbol_ws), None)
+
+                            # إذا كانت العملة معروفة، يتم فحص شروط وقف الخسارة والهدف
+                            if market_info:
+                                await self.check_trade_conditions(symbol_ws, current_price)
+            
+            # تأكد من أن هذه الـ "except" على نفس مستوى الـ "try" تماماً
             except Exception as e:
                 logger.warning(f"Guardian: Public WS connection lost: {e}. Reconnecting...")
                 self.ws = None
                 await asyncio.sleep(5)
-
+                
     async def check_trade_conditions(self, symbol, current_price):
         async with trade_management_lock:
         try:
