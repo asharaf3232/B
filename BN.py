@@ -705,15 +705,17 @@ class UserDataStreamManager:
         self.ws = None
         self.is_running = False
 
+    # استبدل الدالة القديمة بهذه
     async def _get_listen_key(self):
         try:
-            # [إصلاح دائم] استخدام الدالة الصحيحة لـ Binance Spot API
-            self.listen_key = (await self.exchange.private_post_user_data_stream())['listenKey']
+            # [إصلاح] استخدام الدالة الموحدة والصحيحة لإنشاء Listen Key
+            key_data = await self.exchange.create_listen_key()
+            self.listen_key = key_data['listenKey']
             logger.info("User Data Stream: Listen key obtained.")
         except Exception as e:
             logger.error(f"User Data Stream: Failed to get listen key: {e}")
             self.listen_key = None
-
+            
     async def _keep_alive(self):
         while self.is_running:
             await asyncio.sleep(1800) # 30 دقيقة
@@ -994,6 +996,7 @@ class TradeGuardian:
         self.subscribed_symbols = set()
         self.price_cache = defaultdict(float)
 
+    # استبدل الدالة القديمة بهذه
     async def sync_subscriptions(self):
         """مزامنة الاشتراكات مع الصفقات النشطة في DB."""
         try:
@@ -1002,10 +1005,12 @@ class TradeGuardian:
                 active_symbols_records = await (await conn.execute("SELECT DISTINCT symbol FROM trades WHERE status = 'active'")).fetchall()
                 active_symbols = {row['symbol'].lower().replace('/', '') + '@ticker' for row in active_symbols_records}
 
+
             new_subs = active_symbols - self.subscribed_symbols
             unsubs = self.subscribed_symbols - active_symbols
-
-            if self.ws and self.ws.open:
+            
+            # [إصلاح] استخدام الخاصية الصحيحة للتحقق من الاتصال
+            if self.ws and self.ws.is_open:
                 if new_subs:
                     sub_msg = {"method": "SUBSCRIBE", "params": list(new_subs), "id": int(time.time())}
                     await self.ws.send(json.dumps(sub_msg))
@@ -1016,14 +1021,13 @@ class TradeGuardian:
                 if new_subs or unsubs:
                     self.subscribed_symbols = active_symbols
                     logger.info(f"Guardian: Subscriptions synced. Now monitoring {len(self.subscribed_symbols)} symbols.")
-            
             elif new_subs or unsubs:
                  self.subscribed_symbols = active_symbols # Sync state even if not connected
                  logger.info("Guardian: WS not connected, but symbol list updated for next connection.")
 
         except Exception as e:
             logger.error(f"Guardian: Failed to sync subscriptions: {e}", exc_info=True)
-
+            
     async def run_public_ws(self):
         self.is_running = True
         uri = "wss://stream.binance.com:9443/ws"
