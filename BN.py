@@ -1744,7 +1744,8 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         elif data.startswith("strategy_adjust_"): await handle_strategy_adjustment(update, context)
     except Exception as e: logger.error(f"Error in button callback handler for data '{data}': {e}", exc_info=True)
 
-# --- دالة التشغيل الرئيسية ---async def post_init(application: Application):
+# --- دالة التشغيل الرئيسية ---
+async def post_init(application: Application):
     logger.info("Performing post-initialization setup for Reliability-Enhanced Bot...")
     if not all([TELEGRAM_BOT_TOKEN, BINANCE_API_KEY, BINANCE_API_SECRET]):
         logger.critical("FATAL: Missing environment variables."); return
@@ -1782,8 +1783,6 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
 
     asyncio.create_task(bot_data.trade_guardian.run_public_ws())
     asyncio.create_task(bot_data.user_data_stream.run())
-    
-    # ... (باقي الدالة كما هي)
 
     logger.info("Waiting 5s for WebSocket connections..."); await asyncio.sleep(5)
     await bot_data.trade_guardian.sync_subscriptions() # مزامنة أولية للحارس
