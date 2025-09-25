@@ -39,15 +39,14 @@ def test_calculate_sl_tp_zero_atr():
 # --- الجزء الثاني: اختبارات التكامل (Integration Tests) ---
 # =======================================================================================
 
+# استبدل دالة setup_test_environment القديمة بهذه النسخة النهائية
 @pytest_asyncio.fixture
 async def setup_test_environment(mocker, tmp_path):
     """
     [النسخة النهائية] هذه الدالة تقوم بإعداد "مختبر" نظيف مع قاعدة بيانات مؤقتة وإعدادات وهمية.
     """
-    # 1. إنشاء ملف قاعدة بيانات مؤقت ومنفصل لكل اختبار
     test_db_path = tmp_path / "test_db.sqlite"
     
-    # 2. إنشاء الجدول داخل قاعدة البيانات المؤقتة (مع كل الأعمدة اللازمة)
     async with aiosqlite.connect(test_db_path) as db:
         await db.execute('''
             CREATE TABLE trades (
@@ -59,17 +58,17 @@ async def setup_test_environment(mocker, tmp_path):
         ''')
         await db.commit()
     
-    # 3. إنشاء محاكي وهمي للمنصة
     mock_exchange = AsyncMock()
-    # محاكاة رد وهمي من المنصة عند طلب تفاصيل الأمر (لسعر الإغلاق الفعلي)
     mock_exchange.fetch_order.return_value = {'average': 48990.0, 'filled': 0.1}
 
-    # 4. "خداع" البوت ليستخدم مكوناتنا الوهمية
+    # [تعديل مهم] إنشاء كائن وهمي لتطبيق تليجرام
+    mock_application = AsyncMock()
+    bot_data.application = mock_application
+    
     mocker.patch('BN.DB_FILE', str(test_db_path))
     bot_data.exchange = mock_exchange
     mocker.patch('BN.safe_send_message', return_value=None)
     
-    # 5. [الإصلاح الأخير] إعداد إعدادات وهمية ضرورية للاختبار
     bot_data.settings = {
         "trailing_sl_enabled": True,
         "trailing_sl_activation_percent": 1.5,
@@ -79,9 +78,7 @@ async def setup_test_environment(mocker, tmp_path):
         "risk_reward_ratio": 2.0
     }
     
-    # "تسليم" المسار والمحاكي لدالة الاختبار
     yield test_db_path, mock_exchange
-
 
 @pytest.mark.asyncio
 async def test_stop_loss_trigger_scenario(setup_test_environment):
