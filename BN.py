@@ -1755,11 +1755,15 @@ async def post_init(application: Application):
         except LookupError: logger.info("Downloading NLTK data..."); nltk.download('vader_lexicon', quiet=True)
 
     bot_data.application = application
-    bot_data.exchange = ccxt.binance({
+   bot_data.exchange = ccxt.binance({
         'apiKey': BINANCE_API_KEY,
         'secret': BINANCE_API_SECRET,
         'enableRateLimit': True,
-        'options': {'defaultType': 'spot'}
+        'options': {
+            'defaultType': 'spot',
+            # [التعديل]: زيادة المهلة إلى 30 ثانية لتجنب TimeoutError
+            'timeout': 30000 
+        }
     })
 
     try:
@@ -1815,4 +1819,5 @@ def main():
     
 if __name__ == '__main__':
     main()
+
 
