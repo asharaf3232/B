@@ -720,7 +720,7 @@ class UserDataStreamManager:
         self.is_running = False
 
     # استبدل الدالة القديمة بهذه
-async def _get_listen_key(self):
+  async def _get_listen_key(self):
         try:
             # محاولة استدعاء الدالة المخصصة لـ Spot
             key_data = await self.exchange.public_post_userdataStream()
