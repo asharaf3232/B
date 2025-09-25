@@ -720,10 +720,10 @@ class UserDataStreamManager:
         self.is_running = False
 
     # استبدل الدالة القديمة بهذه
-    async def _get_listen_key(self):
+async def _get_listen_key(self):
         try:
-            # [إصلاح] استخدام الدالة الموحدة والصحيحة لإنشاء Listen Key
-            key_data = await self.exchange.create_listen_key()
+            # محاولة استدعاء الدالة المخصصة لـ Spot
+            key_data = await self.exchange.public_post_userdataStream()
             self.listen_key = key_data['listenKey']
             logger.info("User Data Stream: Listen key obtained.")
         except Exception as e:
