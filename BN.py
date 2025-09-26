@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # =======================================================================================
-# --- 🚀 بوت التداول النهائي V6.2.1 (Binance Reliability Enhanced - Patched) 🚀 ---
+# --- 🚀 بوت التداول النهائي V6.1 (Binance Reliability Enhanced - Patched) 🚀 ---
 # =======================================================================================
 #
 # هذا الإصدار هو ترقية هيكلية جذرية لبوت Binance، مستوحاة من البنية القوية لبوت OKX.
@@ -15,12 +15,6 @@
 #     بعد كل عملية شراء ناجحة، مما يضمن الالتزام بالحد الأقصى المحدد للصفقات.
 #   ✅ [هيكلي] **تطبيق نظام الحالة المزدوجة (Pending/Active):** يتم الآن تسجيل الصفقة كـ 'pending' فور إرسال الأمر،
 #     ولا يتم تفعيلها إلا بعد تأكيد التنفيذ الفعلي من المنصة.
-#   ✅ [دمج] **دالة تنفيذ الصفقات المحسنة:** تم استبدال دالة initiate_real_trade بدالة محسنة تتعامل بشكل أفضل مع الأخطاء.
-#   ✅ [دمج] **دالة التحقق من تنفيذ الأوامر:** دالة جديدة للتحقق من تنفيذ الأوامر بشكل موثوق.
-#   ✅ [دمج] **تحسين UserDataStreamManager:** تم استبدال الفئة لتحسين الاتصال ومعالجة الأخطاء.
-#   ✅ [دمج] **تحسينات قاعدة البيانات:** وظائف جديدة للعمليات الآمنة على قاعدة البيانات.
-#   ✅ [دمج] **نظام مراقبة الصحة:** فئة جديدة لمراقبة صحة البوت.
-#   ✅ [دمج] **آلية السيولة المتقدمة:** دالة جديدة للتحقق من السيولة قبل فتح الصفقة.
 #
 # =======================================================================================
 
@@ -239,78 +233,6 @@ async def log_pending_trade_to_db(signal, buy_order):
         logger.error(f"DB Log Pending Error for {signal['symbol']}: {e}")
         return False
 
-# --------------------- دالة التحقق من تنفيذ الأوامر ---------------------------
-async def validate_order_execution(order_id, symbol, max_wait_time=30):
-    """التحقق من تنفيذ الأمر خلال مدة محددة"""
-    start_time = time.time()
-    while time.time() - start_time < max_wait_time:
-        try:
-            order_status = await bot_data.exchange.fetch_order(order_id, symbol)
-            if order_status['status'] == 'closed':
-                filled_amount = float(order_status.get('filled', 0))
-                if filled_amount > 0:
-                    return {
-                        'success': True,
-                        'filled_price': float(order_status.get('average', 0)),
-                        'filled_quantity': filled_amount
-                    }
-                else:
-                    return {'success': False, 'reason': 'Order closed but no fill'}
-            elif order_status['status'] == 'canceled':
-                return {'success': False, 'reason': 'Order was canceled'}
-            elif order_status['status'] in ['open', 'pending']:
-                await asyncio.sleep(2)
-                continue
-        except Exception as e:
-            logging.warning(f"Error checking order {order_id}: {e}")
-            await asyncio.sleep(1)
-    return {'success': False, 'reason': 'Timeout waiting for execution'}
-
-# --------------------- تحسين معالجة قاعدة البيانات ----------------------------
-async def enhanced_database_operations():
-    async with aiosqlite.connect(DB_FILE) as conn:
-        await conn.execute("PRAGMA journal_mode=WAL")
-        await conn.execute("PRAGMA synchronous=NORMAL")
-        await conn.execute("PRAGMA cache_size=1000")
-        await conn.execute("PRAGMA temp_store=memory")
-        await conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status)")
-        await conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_symbol_status ON trades(symbol, status)")
-
-async def safe_db_operation(operation_func, *args, **kwargs):
-    max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            return await operation_func(*args, **kwargs)
-        except aiosqlite.OperationalError as e:
-            if "database is locked" in str(e) and attempt < max_retries - 1:
-                await asyncio.sleep(0.1 * (2 ** attempt))
-                continue
-            raise
-        except Exception as e:
-            logging.error(f"Database operation failed: {e}")
-            raise
-
-# ----------------------- نظام مراقبة الصحة والتشخيص ---------------------------
-class TradingHealthMonitor:
-    def __init__(self):
-        self.metrics = {
-            'successful_orders': 0,
-            'failed_orders': 0,
-            'connection_drops': 0,
-            'last_heartbeat': time.time()
-        }
-
-    async def check_system_health(self):
-        issues = []
-        total_orders = self.metrics['successful_orders'] + self.metrics['failed_orders']
-        if total_orders > 10:
-            success_rate = self.metrics['successful_orders'] / total_orders
-            if success_rate < 0.9:
-                issues.append(f"Low order success rate: {success_rate:.2%}")
-        if time.time() - self.metrics['last_heartbeat'] > 60:
-            issues.append("WebSocket connection may be stale")
-        return issues
-        
 async def safe_send_message(bot, text, **kwargs):
     for i in range(3):
         try:
@@ -595,26 +517,6 @@ def analyze_supertrend_pullback(df, params, rvol, adx_value):
             return {"reason": "supertrend_pullback"}
     return None
 
-# --------------------- آلية السيولة المتقدمة قبل التنفيذ -----------------------
-async def advanced_liquidity_check(symbol, required_amount):
-    try:
-        order_book = await bot_data.exchange.fetch_order_book(symbol, limit=20)
-        available_liquidity = sum(float(price) * float(qty) for price, qty in order_book['asks'][:10])
-        liquidity_ratio = required_amount / available_liquidity
-        if liquidity_ratio > 0.1:
-            logging.warning(f"High liquidity impact for {symbol}: {liquidity_ratio:.2%}")
-            return False
-        best_bid = order_book['bids'][0][0]
-        best_ask = order_book['asks'][0][0]
-        spread_percent = (best_ask - best_bid) / best_bid * 100
-        if spread_percent > 0.5:
-            logging.warning(f"High spread for {symbol}: {spread_percent:.2f}%")
-            return False
-        return True
-    except Exception as e:
-        logging.error(f"Liquidity check failed for {symbol}: {e}")
-        return False
-
 SCANNERS = {
     "momentum_breakout": analyze_momentum_breakout, "breakout_squeeze_pro": analyze_breakout_squeeze_pro,
     "support_rebound": analyze_support_rebound, "sniper_pro": analyze_sniper_pro, "whale_radar": analyze_whale_radar,
@@ -773,208 +675,66 @@ async def worker_batch(queue, signals_list, errors_list):
             if not queue.empty():
                 queue.task_done()
 
-# --------------------- دالة تنفيذ الصفقات المحسنة ----------------------------
-async def initiate_real_trade_enhanced(signal):
-    """دالة تنفيذ الصفقات مع معالجة أفضل للأخطاء وإعادة المحاولة الذكي"""
-    max_retries = 3
-    retry_delays = [1, 3, 5]
-    settings, exchange = bot_data.settings, bot_data.exchange
-    base_trade_size = settings['real_trade_size_usdt']
-    trade_weight = signal.get('weight', 1.0)
-    trade_size = base_trade_size * trade_weight if settings.get('dynamic_trade_sizing_enabled', True) else base_trade_size
-
-    for attempt in range(max_retries):
-        try:
-            balance = await exchange.fetch_balance()
-            usdt_balance = balance.get('USDT', {}).get('free', 0.0)
-            if usdt_balance < trade_size:
-                logging.error(f"Insufficient USDT for {signal['symbol']}. Have: {usdt_balance:,.2f}, Need: {trade_size:,.2f}")
-                return False
-            base_amount = trade_size / signal['entry_price']
-            formatted_amount = exchange.amount_to_precision(signal['symbol'], base_amount)
-            buy_order = await exchange.create_market_buy_order(signal['symbol'], formatted_amount)
-            # التحقق من صحة الاستجابة
-            if not buy_order or not buy_order.get('id'):
-                raise ValueError("Invalid order response from exchange")
-            if await log_pending_trade_to_db(signal, buy_order):
-                await safe_send_message(bot_data.application.bot, f"🚀 تم إرسال أمر شراء لـ `{signal['symbol']}`. في انتظار تأكيد التنفيذ...")
-                return True
-            else:
-                logging.critical(f"CRITICAL: Failed to log pending trade for {signal['symbol']}. Cancelling order {buy_order['id']}.")
-                await exchange.cancel_order(buy_order['id'], signal['symbol'])
-                return False
-        except ccxt.NetworkError as e:
-            logging.warning(f"Network error attempt {attempt+1}: {e}")
-            if attempt < max_retries - 1:
-                await asyncio.sleep(retry_delays[attempt])
-                continue
-        except ccxt.ExchangeError as e:
-            if "insufficient" in str(e).lower():
-                logging.error(f"Insufficient funds: {e}")
-                return False
-            elif "market closed" in str(e).lower():
-                logging.warning(f"Market closed: {e}")
-                return False
-            else:
-                logging.error(f"Exchange error: {e}")
-                return False
-        except Exception as e:
-            logging.error(f"Unexpected error attempt {attempt+1}: {e}", exc_info=True)
-            if attempt < max_retries - 1:
-                await asyncio.sleep(retry_delays[attempt])
-                continue
-    return False
-
-async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
-    async with scan_lock:
-        if not bot_data.trading_enabled:
-            logger.info("Scan skipped: Kill Switch is active."); return
-        
-        scan_start_time = time.time()
-        logger.info("--- Starting new Reliability-Enhanced scan... ---")
-        settings, bot = bot_data.settings, context.bot
-
-        # =================================================================
-        # [تعديل V6.2.1]: التحقق من الرصيد قبل البدء بالمسح المكلف
-        # يوقف البوت عن البحث إذا كان الرصيد لا يكفي حتى لجزء من الصفقة.
-        # =================================================================
-        try:
-            balance = await bot_data.exchange.fetch_balance()
-            usdt_balance = balance.get('USDT', {}).get('free', 0.0)
-            # نستخدم 80% من حجم الصفقة المطلوب كحد أدنى للبدء بالمسح لتجنب البحث غير الضروري
-            trade_size_min_check = settings['real_trade_size_usdt'] * 0.8 
-
-            if usdt_balance < trade_size_min_check:
-                logger.error(f"Scan skipped: Insufficient USDT balance ({usdt_balance:,.2f} < {trade_size_min_check:,.2f}) to open a trade.")
-                await safe_send_message(bot, 
-                    f"🚨 **تم إيقاف فحص السوق!**\n"
-                    f"**السبب:** نقص الرصيد لفتح صفقة واحدة على الأقل.\n"
-                    f"**المتاح:** `${usdt_balance:,.2f}` | **المطلوب:** `${trade_size_min_check:,.2f}`.\n"
-                    f"يرجى تمويل الحساب لاستئناف التداول."
-                )
-                return # ينهي الدالة هنا
-        except Exception as e:
-            logger.error(f"Failed to fetch balance for scan check: {e}"); return
-        # =================================================================
-        # [نهاية تعديل V6.2.1]
-        # =================================================================
-
-        if settings.get('news_filter_enabled', True):
-            mood_result_fundamental = await get_fundamental_market_mood()
-            if mood_result_fundamental['mood'] in ["NEGATIVE", "DANGEROUS"]:
-                bot_data.market_mood = mood_result_fundamental
-                await safe_send_message(bot, f"🚨 **تنبيه: فحص السوق تم إيقافه!**\n"
-                                           f"━━━━━━━━━━━━━━━━━━━━\n"
-                                           f"**السبب:** {mood_result_fundamental['reason']}\n"
-                                           f"**الإجراء:** تم تخطي الفحص لحماية رأس المال.")
-                return
-
-        mood_result = await get_market_mood()
-        bot_data.market_mood = mood_result
-        if mood_result['mood'] in ["NEGATIVE", "DANGEROUS"]:
-            await safe_send_message(bot, f"🚨 **تنبيه: فحص السوق تم إيقافه!**\n"
-                                       f"━━━━━━━━━━━━━━━━━━━━\n"
-                                       f"**السبب الرئيسي:** {mood_result['reason']}\n"
-                                       f"**التفاصيل:** تم تخطي الفحص بسبب ظروف السوق غير المواتية.")
-            return
-
-        async with aiosqlite.connect(DB_FILE) as conn:
-            active_trades_count = (await (await conn.execute("SELECT COUNT(*) FROM trades WHERE status = 'active' OR status = 'pending'")).fetchone())[0]
-        if active_trades_count >= settings['max_concurrent_trades']:
-            logger.info(f"Scan skipped: Max trades ({active_trades_count}) reached."); return
-
-        top_markets = await get_binance_markets()
-        symbols_to_scan = [m['symbol'] for m in top_markets]
-        ohlcv_data = await fetch_ohlcv_batch(bot_data.exchange, symbols_to_scan, TIMEFRAME, 220)
-
-        queue, signals_found, analysis_errors = asyncio.Queue(), [], []
-        for market in top_markets:
-            if market['symbol'] in ohlcv_data:
-                await queue.put({'market': market, 'ohlcv': ohlcv_data[market['symbol']]})
-
-        worker_tasks = [asyncio.create_task(worker_batch(queue, signals_found, analysis_errors)) for _ in range(settings.get("worker_threads", 10))]
-        await queue.join()
-        for task in worker_tasks: task.cancel()
-
-        trades_opened_count = 0
-        signals_found.sort(key=lambda s: s.get('strength', 0), reverse=True)
-
-        for signal in signals_found:
-            # [إصلاح] التحقق من العدد داخل الحلقة
-            if active_trades_count >= settings['max_concurrent_trades']:
-                logger.info(f"Stopping trade initiation, max concurrent trades ({active_trades_count}) reached.")
-                break
-            
-            if time.time() - bot_data.last_signal_time.get(signal['symbol'], 0) > (SCAN_INTERVAL_SECONDS * 0.9):
-                bot_data.last_signal_time[signal['symbol']] = time.time()
-                # Use the new enhanced function
-                if await initiate_real_trade_enhanced(signal):
-                    active_trades_count += 1 # [إصلاح] تحديث العداد فوراً
-                    trades_opened_count += 1
-                await asyncio.sleep(2)
-
-        scan_duration = time.time() - scan_start_time
-        bot_data.last_scan_info = {"start_time": datetime.fromtimestamp(scan_start_time, EGYPT_TZ).strftime('%Y-%m-%d %H:%M:%S'), "duration_seconds": int(scan_duration), "checked_symbols": len(top_markets), "analysis_errors": len(analysis_errors)}
-        await safe_send_message(bot, f"✅ **فحص السوق اكتمل بنجاح**\n"
-                                   f"━━━━━━━━━━━━━━━━━━\n"
-                                   f"**المدة:** {int(scan_duration)} ثانية | **العملات المفحوصة:** {len(top_markets)}\n"
-                                   f"**النتائج:**\n"
-                                   f"  - **إشارات جديدة:** {len(signals_found)}\n"
-                                   f"  - **صفقات تم فتحها:** {trades_opened_count} صفقة\n"
-                                   f"  - **مشكلات تحليل:** {len(analysis_errors)} عملة")
-
 # --- [محرك التداول الجديد V6] ---
-class EnhancedUserDataStream:
+class UserDataStreamManager:
     """مراسل البيانات: يستمع لتحديثات الحساب الخاصة (تنفيذ الأوامر)."""
     def __init__(self, exchange, on_order_update_coro):
         self.exchange = exchange
         self.on_order_update = on_order_update_coro
-        self.connection_retry_count = 0
-        self.max_retries = 5
-        self.heartbeat_interval = 30
         self.listen_key = None
         self.ws = None
         self.is_running = False
 
     async def _get_listen_key(self):
         try:
+            # [الإصلاح الحاسم]: استخدام الدالة الصحيحة لـ Spot API
+            # ccxt uses publicPostUserDataStream for spot listen keys
             self.listen_key = (await self.exchange.publicPostUserDataStream())['listenKey']
-            logging.info("User Data Stream: Listen key obtained.")
+            logger.info("User Data Stream: Listen key obtained.")
         except Exception as e:
-            logging.error(f"User Data Stream: Failed to get listen key: {e}")
+            logger.error(f"User Data Stream: Failed to get listen key: {e}")
             self.listen_key = None
 
-    async def _heartbeat(self):
+    async def _keep_alive(self):
         while self.is_running:
-            await asyncio.sleep(self.heartbeat_interval)
-            if self.ws and not self.ws.closed:
+            await asyncio.sleep(1800) # 30 دقيقة
+            if self.listen_key:
                 try:
-                    await self.ws.ping()
+                    # [الإصلاح الحاسم]: استخدام الدالة الصحيحة لـ Spot API
+                    # ccxt uses publicPutUserDataStream to renew the key
+                    await self.exchange.publicPutUserDataStream({'listenKey': self.listen_key})
+                    logger.info("User Data Stream: Listen key kept alive.")
                 except Exception as e:
-                    logging.warning(f"Heartbeat failed: {e}")
+                    logger.warning(f"User Data Stream: Failed to keep listen key alive: {e}")
+                    self.listen_key = None # Invalidate key on failure
 
-    async def run_with_heartbeat(self):
+    async def run(self):
         self.is_running = True
+        asyncio.create_task(self._keep_alive())
         while self.is_running:
+            await self._get_listen_key()
+            if not self.listen_key:
+                await asyncio.sleep(60)
+                continue
+
+            uri = f"wss://stream.binance.com:9443/ws/{self.listen_key}"
             try:
-                await self._get_listen_key()
-                if not self.listen_key:
-                    await asyncio.sleep(60)
-                    continue
-                heartbeat_task = asyncio.create_task(self._heartbeat())
-                uri = f"wss://stream.binance.com:9443/ws/{self.listen_key}"
                 async with websockets.connect(uri) as ws:
                     self.ws = ws
-                    self.connection_retry_count = 0
+                    logger.info("✅ [User Data Stream] Connected.")
                     async for message in ws:
-                        await self.on_order_update(message)
-            except Exception as e:
-                self.connection_retry_count += 1
-                if self.connection_retry_count >= self.max_retries:
-                    logging.critical("Max WebSocket retries exceeded")
-                    break
-                delay = min(60, 2 ** self.connection_retry_count)
-                await asyncio.sleep(delay)
+                        data = json.loads(message)
+                        if data.get('e') == 'executionReport' and data.get('x') == 'TRADE' and data.get('S') == 'BUY':
+                            await self.on_order_update(data)
+            except websockets.exceptions.ConnectionClosedOK:
+                logger.info("User Data Stream: Connection closed gracefully. Stopping.")
+                break
+            except (websockets.exceptions.ConnectionClosed, Exception) as e:
+                if self.is_running:
+                    logger.warning(f"User Data Stream: Connection lost: {e}. Reconnecting...")
+                    await asyncio.sleep(5)
+                else:
+                    break # Stop if not running
 
     async def stop(self):
         self.is_running = False
@@ -1094,6 +854,103 @@ async def initiate_real_trade(signal):
     except Exception as e:
         logger.error(f"REAL TRADE FAILED {signal['symbol']}: {e}", exc_info=True)
         return False
+
+async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
+    async with scan_lock:
+        if not bot_data.trading_enabled:
+            logger.info("Scan skipped: Kill Switch is active."); return
+        
+        scan_start_time = time.time()
+        logger.info("--- Starting new Reliability-Enhanced scan... ---")
+        settings, bot = bot_data.settings, context.bot
+
+        # =================================================================
+        # [تعديل V6.2.1]: التحقق من الرصيد قبل البدء بالمسح المكلف
+        # يوقف البوت عن البحث إذا كان الرصيد لا يكفي حتى لجزء من الصفقة.
+        # =================================================================
+        try:
+            balance = await bot_data.exchange.fetch_balance()
+            usdt_balance = balance.get('USDT', {}).get('free', 0.0)
+            # نستخدم 80% من حجم الصفقة المطلوب كحد أدنى للبدء بالمسح لتجنب البحث غير الضروري
+            trade_size_min_check = settings['real_trade_size_usdt'] * 0.8 
+
+            if usdt_balance < trade_size_min_check:
+                logger.error(f"Scan skipped: Insufficient USDT balance ({usdt_balance:,.2f} < {trade_size_min_check:,.2f}) to open a trade.")
+                await safe_send_message(bot, 
+                    f"🚨 **تم إيقاف فحص السوق!**\n"
+                    f"**السبب:** نقص الرصيد لفتح صفقة واحدة على الأقل.\n"
+                    f"**المتاح:** `${usdt_balance:,.2f}` | **المطلوب:** `${trade_size_min_check:,.2f}`.\n"
+                    f"يرجى تمويل الحساب لاستئناف التداول."
+                )
+                return # ينهي الدالة هنا
+        except Exception as e:
+            logger.error(f"Failed to fetch balance for scan check: {e}"); return
+        # =================================================================
+        # [نهاية تعديل V6.2.1]
+        # =================================================================
+
+        if settings.get('news_filter_enabled', True):
+            mood_result_fundamental = await get_fundamental_market_mood()
+            if mood_result_fundamental['mood'] in ["NEGATIVE", "DANGEROUS"]:
+                bot_data.market_mood = mood_result_fundamental
+                await safe_send_message(bot, f"🚨 **تنبيه: فحص السوق تم إيقافه!**\n"
+                                           f"━━━━━━━━━━━━━━━━━━━━\n"
+                                           f"**السبب:** {mood_result_fundamental['reason']}\n"
+                                           f"**الإجراء:** تم تخطي الفحص لحماية رأس المال.")
+                return
+
+        mood_result = await get_market_mood()
+        bot_data.market_mood = mood_result
+        if mood_result['mood'] in ["NEGATIVE", "DANGEROUS"]:
+            await safe_send_message(bot, f"🚨 **تنبيه: فحص السوق تم إيقافه!**\n"
+                                       f"━━━━━━━━━━━━━━━━━━━━\n"
+                                       f"**السبب الرئيسي:** {mood_result['reason']}\n"
+                                       f"**التفاصيل:** تم تخطي الفحص بسبب ظروف السوق غير المواتية.")
+            return
+
+        async with aiosqlite.connect(DB_FILE) as conn:
+            active_trades_count = (await (await conn.execute("SELECT COUNT(*) FROM trades WHERE status = 'active' OR status = 'pending'")).fetchone())[0]
+        if active_trades_count >= settings['max_concurrent_trades']:
+            logger.info(f"Scan skipped: Max trades ({active_trades_count}) reached."); return
+
+        top_markets = await get_binance_markets()
+        symbols_to_scan = [m['symbol'] for m in top_markets]
+        ohlcv_data = await fetch_ohlcv_batch(bot_data.exchange, symbols_to_scan, TIMEFRAME, 220)
+
+        queue, signals_found, analysis_errors = asyncio.Queue(), [], []
+        for market in top_markets:
+            if market['symbol'] in ohlcv_data:
+                await queue.put({'market': market, 'ohlcv': ohlcv_data[market['symbol']]})
+
+        worker_tasks = [asyncio.create_task(worker_batch(queue, signals_found, analysis_errors)) for _ in range(settings.get("worker_threads", 10))]
+        await queue.join()
+        for task in worker_tasks: task.cancel()
+
+        trades_opened_count = 0
+        signals_found.sort(key=lambda s: s.get('strength', 0), reverse=True)
+
+        for signal in signals_found:
+            # [إصلاح] التحقق من العدد داخل الحلقة
+            if active_trades_count >= settings['max_concurrent_trades']:
+                logger.info(f"Stopping trade initiation, max concurrent trades ({active_trades_count}) reached.")
+                break
+            
+            if time.time() - bot_data.last_signal_time.get(signal['symbol'], 0) > (SCAN_INTERVAL_SECONDS * 0.9):
+                bot_data.last_signal_time[signal['symbol']] = time.time()
+                if await initiate_real_trade(signal):
+                    active_trades_count += 1 # [إصلاح] تحديث العداد فوراً
+                    trades_opened_count += 1
+                await asyncio.sleep(2)
+
+        scan_duration = time.time() - scan_start_time
+        bot_data.last_scan_info = {"start_time": datetime.fromtimestamp(scan_start_time, EGYPT_TZ).strftime('%Y-%m-%d %H:%M:%S'), "duration_seconds": int(scan_duration), "checked_symbols": len(top_markets), "analysis_errors": len(analysis_errors)}
+        await safe_send_message(bot, f"✅ **فحص السوق اكتمل بنجاح**\n"
+                                   f"━━━━━━━━━━━━━━━━━━\n"
+                                   f"**المدة:** {int(scan_duration)} ثانية | **العملات المفحوصة:** {len(top_markets)}\n"
+                                   f"**النتائج:**\n"
+                                   f"  - **إشارات جديدة:** {len(signals_found)}\n"
+                                   f"  - **صفقات تم فتحها:** {trades_opened_count} صفقة\n"
+                                   f"  - **مشكلات تحليل:** {len(analysis_errors)} عملة")
 
 class TradeGuardian:
     """الحارس: يراقب أسعار الصفقات النشطة ويتخذ قرارات الإغلاق."""
@@ -1591,9 +1448,7 @@ async def show_diagnostics_command(update: Update, context: ContextTypes.DEFAULT
         guardian_ws_status = "غير متصل ❌"
     
     uds_ws_status = "متصل ✅"
-    # The new UDS class doesn't have a direct 'ws' property, but run_with_heartbeat() handles reconnection
-    # A simple check for is_running is sufficient for a high-level status.
-    if bot_data.user_data_stream is None or not bot_data.user_data_stream.is_running:
+    if bot_data.user_data_stream is None or bot_data.user_data_stream.ws is None or bot_data.user_data_stream.ws.closed:
         uds_ws_status = "غير متصل ❌"
         
     report = (
@@ -1932,21 +1787,16 @@ async def post_init(application: Application):
 
     load_settings()
     await init_database()
-    
-    # Run the enhanced database setup as a one-off task
-    await enhanced_database_operations()
 
     # --- [بدء تشغيل الأنظمة الجديدة] ---
     bot_data.trade_guardian = TradeGuardian(application)
-    # Use the enhanced UserDataStream class
-    bot_data.user_data_stream = EnhancedUserDataStream(bot_data.exchange, handle_order_update)
+    bot_data.user_data_stream = UserDataStreamManager(bot_data.exchange, handle_order_update)
 
     # 1. إطلاق مهمة الحارس (الـ Public WS)
     asyncio.create_task(bot_data.trade_guardian.run_public_ws())
     
     # 2. إطلاق مهمة UDS (الـ Private WS)
-    # Use the enhanced UDS run method
-    asyncio.create_task(bot_data.user_data_stream.run_with_heartbeat())
+    asyncio.create_task(bot_data.user_data_stream.run())
 
     # [التعديل النهائي]: الانتظار 10 ثوانٍ لضمان استقرار الاتصالات
     logger.info("Waiting 10s for WebSocket connections..."); await asyncio.sleep(10)
@@ -1960,9 +1810,9 @@ async def post_init(application: Application):
     jq.run_repeating(propose_strategy_changes, interval=STRATEGY_ANALYSIS_INTERVAL_SECONDS, first=120, name="propose_strategy_changes")
 
     logger.info(f"All jobs scheduled. Supervisor running every {SUPERVISOR_INTERVAL_SECONDS}s.")
-    try: await application.bot.send_message(TELEGRAM_CHAT_ID, "*🤖 بوت باينانس V6.2.1 (إصدار مصحح ومستقر) - بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
+    try: await application.bot.send_message(TELEGRAM_CHAT_ID, "*🤖 بوت باينانس V6.2 (إصدار مصحح ومستقر) - بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
     except Forbidden: logger.critical(f"FATAL: Bot not authorized for chat ID {TELEGRAM_CHAT_ID}."); return
-    logger.info("--- Binance Reliability-Enhanced Bot V6.2.1 is now fully operational ---")
+    logger.info("--- Binance Reliability-Enhanced Bot V6.2 is now fully operational ---")
 
 async def post_shutdown(application: Application):
     if bot_data.exchange: await bot_data.exchange.close()
@@ -1985,3 +1835,248 @@ def main():
     
 if __name__ == '__main__':
     main()
+
+
+
+
+
+
+
+
+# =================== التحسينات المضافة ===================
+
+# دالة التنفيذ المحسنة (استبدال initiate_real_trade)
+async def initiate_real_trade(signal):
+    """دالة تنفيذ الصفقات مع معالجة أفضل للأخطاء وإعادة المحاولة الذكي"""
+    max_retries = 3
+    retry_delays = [1, 3, 5]
+    settings, exchange = bot_data.settings, bot_data.exchange
+    base_trade_size = settings['real_trade_size_usdt']
+    trade_weight = signal.get('weight', 1.0)
+    trade_size = base_trade_size * trade_weight if settings.get('dynamic_trade_sizing_enabled', True) else base_trade_size
+
+    # فحص السيولة المتقدم
+    liquidity_check = await advanced_liquidity_check(signal['symbol'], trade_size)
+    if not liquidity_check:
+        logging.warning(f"Liquidity check failed for {signal['symbol']}")
+        return False
+
+    for attempt in range(max_retries):
+        try:
+            balance = await exchange.fetch_balance()
+            usdt_balance = balance.get('USDT', {}).get('free', 0.0)
+            if usdt_balance < trade_size:
+                logging.error(f"Insufficient USDT for {signal['symbol']}. Have: {usdt_balance:,.2f}, Need: {trade_size:,.2f}")
+                return False
+
+            base_amount = trade_size / signal['entry_price']
+            formatted_amount = exchange.amount_to_precision(signal['symbol'], base_amount)
+
+            # إنشاء الأمر
+            buy_order = await exchange.create_market_buy_order(signal['symbol'], formatted_amount)
+
+            # التحقق من صحة الاستجابة
+            if not buy_order or not buy_order.get('id'):
+                raise ValueError("Invalid order response from exchange")
+
+            # تسجيل الصفقة كـ pending
+            if await log_pending_trade_to_db(signal, buy_order):
+                await safe_send_message(bot_data.application.bot, f"🚀 تم إرسال أمر شراء لـ `{signal['symbol']}`. في انتظار تأكيد التنفيذ...")
+
+                # التحقق من التنفيذ
+                validation = await validate_order_execution(buy_order['id'], signal['symbol'])
+                if validation['success']:
+                    logging.info(f"Order {buy_order['id']} successfully executed")
+                    return True
+                else:
+                    logging.warning(f"Order validation failed: {validation['reason']}")
+
+                return True
+            else:
+                logging.critical(f"CRITICAL: Failed to log pending trade for {signal['symbol']}. Cancelling order {buy_order['id']}.")
+                try:
+                    await exchange.cancel_order(buy_order['id'], signal['symbol'])
+                except:
+                    pass
+                return False
+
+        except ccxt.NetworkError as e:
+            logging.warning(f"Network error attempt {attempt+1}: {e}")
+            if attempt < max_retries - 1:
+                await asyncio.sleep(retry_delays[attempt])
+                continue
+
+        except ccxt.ExchangeError as e:
+            error_msg = str(e).lower()
+            if "insufficient" in error_msg:
+                logging.error(f"Insufficient funds: {e}")
+                return False
+            elif "market closed" in error_msg:
+                logging.warning(f"Market closed: {e}")
+                return False
+            elif "minimum notional" in error_msg:
+                logging.warning(f"Minimum notional not met: {e}")
+                return False
+            else:
+                logging.error(f"Exchange error: {e}")
+                return False
+
+        except Exception as e:
+            logging.error(f"Unexpected error attempt {attempt+1}: {e}", exc_info=True)
+            if attempt < max_retries - 1:
+                await asyncio.sleep(retry_delays[attempt])
+                continue
+
+    logging.error(f"All {max_retries} attempts failed for {signal['symbol']}")
+    return False
+
+# دالة التحقق من تنفيذ الأوامر
+async def validate_order_execution(order_id, symbol, max_wait_time=30):
+    """التحقق من تنفيذ الأمر خلال مدة محددة"""
+    start_time = time.time()
+
+    while time.time() - start_time < max_wait_time:
+        try:
+            order_status = await bot_data.exchange.fetch_order(order_id, symbol)
+
+            if order_status['status'] == 'closed':
+                filled_amount = float(order_status.get('filled', 0))
+                if filled_amount > 0:
+                    return {
+                        'success': True,
+                        'filled_price': float(order_status.get('average', 0)),
+                        'filled_quantity': filled_amount,
+                        'order_status': order_status
+                    }
+                else:
+                    return {'success': False, 'reason': 'Order closed but no fill'}
+
+            elif order_status['status'] == 'canceled':
+                return {'success': False, 'reason': 'Order was canceled'}
+
+            elif order_status['status'] in ['open', 'pending']:
+                await asyncio.sleep(2)
+                continue
+
+        except Exception as e:
+            logging.warning(f"Error checking order {order_id}: {e}")
+            await asyncio.sleep(1)
+
+    return {'success': False, 'reason': 'Timeout waiting for execution'}
+
+# فحص السيولة المتقدم
+async def advanced_liquidity_check(symbol, required_amount):
+    """فحص متقدم للسيولة قبل التنفيذ"""
+    try:
+        # فحص السيولة من order book
+        order_book = await bot_data.exchange.fetch_order_book(symbol, limit=20)
+
+        # حساب السيولة المتاحة في أول 10 مستويات
+        available_liquidity = sum(
+            float(price) * float(qty) 
+            for price, qty in order_book['asks'][:10]
+        )
+
+        # فحص نسبة السيولة المطلوبة (يجب ألا تزيد عن 10% من السيولة المتاحة)
+        liquidity_ratio = required_amount / available_liquidity if available_liquidity > 0 else 1
+
+        if liquidity_ratio > 0.1:  # أكثر من 10% من السيولة
+            logging.warning(f"High liquidity impact for {symbol}: {liquidity_ratio:.2%}")
+            return False
+
+        # فحص الفارق السعري (spread)
+        if len(order_book['bids']) > 0 and len(order_book['asks']) > 0:
+            best_bid = float(order_book['bids'][0][0])
+            best_ask = float(order_book['asks'][0][0])
+            spread_percent = (best_ask - best_bid) / best_bid * 100
+
+            if spread_percent > 0.5:  # فارق أكثر من 0.5%
+                logging.warning(f"High spread for {symbol}: {spread_percent:.2f}%")
+                return False
+
+        return True
+
+    except Exception as e:
+        logging.error(f"Liquidity check failed for {symbol}: {e}")
+        return False  # في حالة الفشل، نرفض الصفقة لضمان الأمان
+
+# عمليات قاعدة البيانات المحسنة
+async def safe_db_operation(operation_func, *args, **kwargs):
+    """تنفيذ آمن لعمليات قاعدة البيانات مع إعادة المحاولة"""
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            return await operation_func(*args, **kwargs)
+        except aiosqlite.OperationalError as e:
+            if "database is locked" in str(e) and attempt < max_retries - 1:
+                await asyncio.sleep(0.1 * (2 ** attempt))  # تأخير متدرج
+                continue
+            raise
+        except Exception as e:
+            logging.error(f"Database operation failed: {e}")
+            raise
+
+# نظام مراقبة الصحة
+class TradingHealthMonitor:
+    def __init__(self):
+        self.metrics = {
+            'successful_orders': 0,
+            'failed_orders': 0,
+            'connection_drops': 0,
+            'last_heartbeat': time.time(),
+            'last_health_check': time.time()
+        }
+
+    def record_successful_order(self):
+        self.metrics['successful_orders'] += 1
+
+    def record_failed_order(self):
+        self.metrics['failed_orders'] += 1
+
+    def record_connection_drop(self):
+        self.metrics['connection_drops'] += 1
+
+    def update_heartbeat(self):
+        self.metrics['last_heartbeat'] = time.time()
+
+    async def check_system_health(self):
+        """فحص صحة النظام العامة"""
+        issues = []
+        current_time = time.time()
+
+        # فحص معدل نجاح الأوامر
+        total_orders = self.metrics['successful_orders'] + self.metrics['failed_orders']
+        if total_orders > 10:
+            success_rate = self.metrics['successful_orders'] / total_orders
+            if success_rate < 0.9:
+                issues.append(f"Low order success rate: {success_rate:.2%}")
+
+        # فحص اتصال WebSocket
+        if current_time - self.metrics['last_heartbeat'] > 60:
+            issues.append("WebSocket connection may be stale")
+
+        # فحص عدد انقطاعات الاتصال
+        if self.metrics['connection_drops'] > 5:
+            issues.append(f"High connection drops: {self.metrics['connection_drops']}")
+
+        # تحديث وقت آخر فحص
+        self.metrics['last_health_check'] = current_time
+
+        return issues
+
+    def get_health_report(self):
+        """الحصول على تقرير حالة النظام"""
+        total_orders = self.metrics['successful_orders'] + self.metrics['failed_orders']
+        success_rate = (self.metrics['successful_orders'] / total_orders * 100) if total_orders > 0 else 0
+
+        return {
+            'total_orders': total_orders,
+            'success_rate': f"{success_rate:.2f}%",
+            'connection_drops': self.metrics['connection_drops'],
+            'last_heartbeat_ago': f"{time.time() - self.metrics['last_heartbeat']:.1f}s",
+            'uptime_hours': f"{(time.time() - self.metrics.get('start_time', time.time())) / 3600:.2f}"
+        }
+
+# إنشاء مثيل من مراقب الصحة
+health_monitor = TradingHealthMonitor()
+health_monitor.metrics['start_time'] = time.time()
