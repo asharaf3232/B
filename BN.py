@@ -975,7 +975,6 @@ class TradeGuardian:
 
                     trade = dict(trade); settings = bot_data.settings
 
-                    # [منطق الوقف المتحرك ورفع الوقف]
                     if settings['trailing_sl_enabled']:
                         # --- Trailing SL Logic ---
                         highest_price = max(trade.get('highest_price', 0), current_price)
@@ -994,7 +993,6 @@ class TradeGuardian:
                                 trade['stop_loss'] = new_sl
                                 await conn.execute("UPDATE trades SET stop_loss = ? WHERE id = ?", (new_sl, trade['id']))
 
-                    # [منطق إشعارات الربح المتزايدة]
                     if settings.get('incremental_notifications_enabled', True):
                         # --- Incremental Notification Logic ---
                         last_notified = trade.get('last_profit_notification_price', trade['entry_price'])
@@ -1006,7 +1004,6 @@ class TradeGuardian:
                     
                     await conn.commit()
 
-                # --- Exit Logic (يجب أن تكون خارج كتلة aiosqlite.connect للتشغيل الصحيح) ---
                 if current_price >= trade['take_profit']: await self._close_trade(trade, "ناجحة (TP)", current_price)
                 elif current_price <= trade['stop_loss']:
                     reason = "فاشلة (SL)"
@@ -1015,25 +1012,21 @@ class TradeGuardian:
 
             except Exception as e:
                 logger.error(f"Guardian Ticker Error for {symbol}: {e}", exc_info=True)
-                
-    # =======================================================================================
-    # [تعديل جديد V6.3]: دالة مساعدة للاختبار
-    # هذه الدالة تجعل منطق handle_ticker_update قابلاً للاستدعاء مباشرة للاختبارات الخارجية
-    # =======================================================================================
+
+    # =================================================================
+    # [دالة مساعدة للاختبار]
+    # =================================================================
     async def check_trade_conditions(self, symbol, current_price):
         """دالة مساعدة مخصصة للاختبارات المتقدمة (مثل Pytest)."""
-        # بناء هيكل رسالة WebSocket مطابق للمتوقع
+        # بناء هيكل رسالة WebSocket مطابق للمتوقع (Binance)
         mock_data = {
             's': symbol.replace('/USDT', 'USDT'),
             'c': str(current_price)
         }
         mock_message = json.dumps(mock_data)
-        
-        # استدعاء دالة معالجة التحديث الأساسية
         await self.handle_ticker_update(mock_message)
-    # =======================================================================================
-    # [نهاية التعديل V6.3]
-    # =======================================================================================
+
+    # =================================================================
     
     async def _close_trade(self, trade, reason, close_price):
         symbol, trade_id = trade['symbol'], trade['id']
@@ -1042,10 +1035,8 @@ class TradeGuardian:
 
         for i in range(bot_data.settings.get('close_retries', 3)):
             try:
-                # محاولة البيع
                 await bot_data.exchange.create_market_sell_order(symbol, trade['quantity'])
 
-                # إذا نجح البيع
                 pnl = (close_price - trade['entry_price']) * trade['quantity']
                 pnl_percent = (close_price / trade['entry_price'] - 1) * 100 if trade['entry_price'] > 0 else 0
                 emoji = "✅" if pnl > 0 else "🛑"
@@ -1058,9 +1049,6 @@ class TradeGuardian:
                 await safe_send_message(bot, f"{emoji} **تم إغلاق الصفقة | #{trade_id} {symbol}**\n**السبب:** {reason}\n**الربح/الخسارة:** `${pnl:,.2f}` ({pnl_percent:+.2f}%)")
                 return
 
-            except ccxt.InsufficientFunds as e:
-                logger.warning(f"Failed to close trade #{trade_id} due to Insufficient Funds. Trade might be partially or fully closed already. ({i + 1}/{bot_data.settings.get('close_retries', 3)})", exc_info=True)
-                await asyncio.sleep(5)
             except Exception as e:
                 logger.warning(f"Failed to close trade #{trade_id}. Retrying... ({i + 1}/{bot_data.settings.get('close_retries', 3)})", exc_info=True)
                 await asyncio.sleep(5)
@@ -1069,7 +1057,7 @@ class TradeGuardian:
         async with aiosqlite.connect(DB_FILE) as conn:
             await conn.execute("UPDATE trades SET status = 'closure_failed' WHERE id = ?", (trade_id,))
             await conn.commit()
-        await safe_send_message(bot, f"🚨 **فشل حرج** 🚨\nفشل إغلاق الصفقة `#{trade_id}`. الرجاء مراجعة المنصة يدوياً.")
+        await safe_send_message(bot, f"🚨 **فشل حرج** 🚨\nفشل إغلاق الصفقة `#{trade_id}` بعد عدة محاولات. الرجاء مراجعة المنصة يدوياً.")
         await self.sync_subscriptions()
 
     async def run_public_ws(self):
@@ -1079,12 +1067,16 @@ class TradeGuardian:
             if not stream_name:
                 await asyncio.sleep(5); continue
 
-            # Binance Public WS Endpoint (Spot)
             uri = f"wss://stream.binance.com:9443/ws/{stream_name}"
             try:
                 async with websockets.connect(uri) as ws:
                     self.public_ws = ws
+                    
+                    # [تأكيد الاتصال والمزامنة الفورية عند البدء]
+                    # هذا يضمن أن رسالة "Connected" تظهر فقط عندما يكون الاتصال ناجحًا.
+                    await self.sync_subscriptions(reconnect=True) 
                     logger.info(f"✅ [Guardian's Eyes] Connected. Watching {len(self.subscriptions)} symbols.")
+                    
                     async for message in ws:
                         await self.handle_ticker_update(message)
             except websockets.exceptions.ConnectionClosedOK:
@@ -1094,23 +1086,21 @@ class TradeGuardian:
                     logger.warning(f"Guardian's Eyes: Connection lost: {e}. Reconnecting...")
                     await asyncio.sleep(5)
                 else:
-                    break # Stop if bot is manually stopping
+                    break
 
-    async def sync_subscriptions(self):
+    async def sync_subscriptions(self, reconnect=False):
         """تضمن أن الحارس يراقب فقط الصفقات النشطة."""
         async with aiosqlite.connect(DB_FILE) as conn:
             active_symbols = {row[0] for row in await (await conn.execute("SELECT DISTINCT symbol FROM trades WHERE status = 'active'")).fetchall()}
 
-        if active_symbols != self.subscriptions:
+        if active_symbols != self.subscriptions or reconnect:
             logger.info(f"Guardian: Syncing subscriptions. Old: {len(self.subscriptions)}, New: {len(active_symbols)}")
             self.subscriptions = active_symbols
-            # إذا كان الاتصال موجوداً ومفتوحاً، أغلقه لإعادة الاتصال مع الاشتراكات الجديدة
-            if self.public_ws and not self.public_ws.closed:
+            if self.public_ws and not self.public_ws.closed and not reconnect: # لا نغلق الاتصال إذا كنا في وضع إعادة الاتصال
                 try:
-                    # إغلاق أنيق
                     await self.public_ws.close(code=1000, reason='Subscription change')
-                except Exception as e:
-                    logger.warning(f"Error closing Guardian WS for sync: {e}")
+                except Exception:
+                    pass # تجاهل أي خطأ في الإغلاق إذا كان الاتصال غير مستقر
 
     async def stop(self):
         self.is_running = False
@@ -1802,11 +1792,15 @@ async def post_init(application: Application):
     bot_data.trade_guardian = TradeGuardian(application)
     bot_data.user_data_stream = UserDataStreamManager(bot_data.exchange, handle_order_update)
 
+    # 1. إطلاق مهمة الحارس (الـ Public WS)
     asyncio.create_task(bot_data.trade_guardian.run_public_ws())
+    
+    # 2. إطلاق مهمة UDS (الـ Private WS)
     asyncio.create_task(bot_data.user_data_stream.run())
 
+    # [التعديل النهائي]: الانتظار 10 ثوانٍ لضمان استقرار الاتصالات
     logger.info("Waiting 10s for WebSocket connections..."); await asyncio.sleep(10)
-    await bot_data.trade_guardian.sync_subscriptions() # مزامنة أولية للحارس
+    # لا حاجة لاستدعاء sync_subscriptions هنا، فقد تم استدعاؤها داخل run_public_ws
 
     jq = application.job_queue
     jq.run_repeating(perform_scan, interval=SCAN_INTERVAL_SECONDS, first=10, name="perform_scan")
@@ -1841,6 +1835,7 @@ def main():
     
 if __name__ == '__main__':
     main()
+
 
 
 
