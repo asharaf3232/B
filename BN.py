@@ -1076,6 +1076,7 @@ class TradeGuardian:
                     # هذا يضمن أن رسالة "Connected" تظهر فقط عندما يكون الاتصال ناجحًا.
                     await self.sync_subscriptions(reconnect=True) 
                     logger.info(f"✅ [Guardian's Eyes] Connected. Watching {len(self.subscriptions)} symbols.")
+                    
 class TradeGuardian:
     """الحارس: يراقب أسعار الصفقات النشطة ويتخذ قرارات الإغلاق."""
     def __init__(self, application):
@@ -2229,4 +2230,5 @@ class TradingHealthMonitor:
 # إنشاء مثيل من مراقب الصحة
 health_monitor = TradingHealthMonitor()
 health_monitor.metrics['start_time'] = time.time()
+
 
