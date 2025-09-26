@@ -1076,6 +1076,154 @@ class TradeGuardian:
                     # هذا يضمن أن رسالة "Connected" تظهر فقط عندما يكون الاتصال ناجحًا.
                     await self.sync_subscriptions(reconnect=True) 
                     logger.info(f"✅ [Guardian's Eyes] Connected. Watching {len(self.subscriptions)} symbols.")
+class TradeGuardian:
+    """الحارس: يراقب أسعار الصفقات النشطة ويتخذ قرارات الإغلاق."""
+    def __init__(self, application):
+        self.application = application
+        self.public_ws = None
+        self.subscriptions = set()
+        self.is_running = False
+
+    async def handle_ticker_update(self, message):
+        data = json.loads(message)
+        if 's' not in data: return
+        symbol = data['s'].replace('USDT', '/USDT')
+        current_price = float(data['c'])
+
+        async with trade_management_lock:
+            try:
+                async with aiosqlite.connect(DB_FILE) as conn:
+                    conn.row_factory = aiosqlite.Row
+                    trade = await (await conn.execute("SELECT * FROM trades WHERE symbol = ? AND status = 'active'", (symbol,))).fetchone()
+                    if not trade: return
+
+                    trade = dict(trade); settings = bot_data.settings
+
+                    if settings['trailing_sl_enabled']:
+                        # --- Trailing SL Logic ---
+                        highest_price = max(trade.get('highest_price', 0), current_price)
+                        if highest_price > trade.get('highest_price', 0):
+                            await conn.execute("UPDATE trades SET highest_price = ? WHERE id = ?", (highest_price, trade['id']))
+
+                        if not trade['trailing_sl_active'] and current_price >= trade['entry_price'] * (1 + settings['trailing_sl_activation_percent'] / 100):
+                            trade['trailing_sl_active'] = True
+                            new_sl = trade['entry_price']
+                            await conn.execute("UPDATE trades SET trailing_sl_active = 1, stop_loss = ? WHERE id = ?", (new_sl, trade['id']))
+                            await safe_send_message(self.application.bot, f"**🚀 تأمين الأرباح! | #{trade['id']} {trade['symbol']}**\nتم رفع وقف الخسارة إلى نقطة الدخول: `${new_sl}`")
+
+                        if trade['trailing_sl_active']:
+                            new_sl = highest_price * (1 - settings['trailing_sl_callback_percent'] / 100)
+                            if new_sl > trade['stop_loss']:
+                                trade['stop_loss'] = new_sl
+                                await conn.execute("UPDATE trades SET stop_loss = ? WHERE id = ?", (new_sl, trade['id']))
+
+                    if settings.get('incremental_notifications_enabled', True):
+                        # --- Incremental Notification Logic ---
+                        last_notified = trade.get('last_profit_notification_price', trade['entry_price'])
+                        increment = settings['incremental_notification_percent'] / 100
+                        if current_price >= last_notified * (1 + increment):
+                            profit_percent = ((current_price / trade['entry_price'] - 1) * 100)
+                            await safe_send_message(self.application.bot, f"📈 **ربح متزايد! | #{trade['id']} {trade['symbol']}**\n**الربح الحالي:** `{profit_percent:+.2f}%`")
+                            await conn.execute("UPDATE trades SET last_profit_notification_price = ? WHERE id = ?", (current_price, trade['id']))
+                    
+                    await conn.commit()
+
+                if current_price >= trade['take_profit']: await self._close_trade(trade, "ناجحة (TP)", current_price)
+                elif current_price <= trade['stop_loss']:
+                    reason = "فاشلة (SL)"
+                    if current_price > trade['entry_price']: reason = "تم تأمين الربح (TSL)"
+                    await self._close_trade(trade, reason, current_price)
+
+            except Exception as e:
+                logger.error(f"Guardian Ticker Error for {symbol}: {e}", exc_info=True)
+
+    # =================================================================
+    # [دالة مساعدة للاختبار]
+    # =================================================================
+    async def check_trade_conditions(self, symbol, current_price):
+        """دالة مساعدة مخصصة للاختبارات المتقدمة (مثل Pytest)."""
+        # بناء هيكل رسالة WebSocket مطابق للمتوقع (Binance)
+        mock_data = {
+            's': symbol.replace('/USDT', 'USDT'),
+            'c': str(current_price)
+        }
+        mock_message = json.dumps(mock_data)
+        await self.handle_ticker_update(mock_message)
+
+    # =================================================================
+    
+    async def _close_trade(self, trade, reason, close_price):
+        symbol, trade_id = trade['symbol'], trade['id']
+        bot = self.application.bot
+        logger.info(f"Guardian: Attempting to close trade #{trade_id} for {symbol}. Reason: {reason}")
+        
+        # [ثابت Binance]: الحد الأدنى للقيمة الإجمالية للأمر
+        MINIMUM_NOTIONAL_VALUE = 10.0
+
+        for i in range(bot_data.settings.get('close_retries', 3)):
+            try:
+                # 1. الحصول على الكمية المتاحة فعليًا في المحفظة
+                asset_to_sell = symbol.split('/')[0]
+                balance = await bot_data.exchange.fetch_balance()
+                available_quantity = balance.get(asset_to_sell, {}).get('free', 0.0)
+                
+                # 2. التحقق من وجود كمية كافية للبيع (أكبر من 0)
+                if available_quantity <= 0:
+                    logging.warning(f"Trade #{trade_id} already closed or no balance for {asset_to_sell}.")
+                    break # لا يوجد شيء للبيع، نكسر حلقة المحاولات
+
+                # 3. التحقق من أن الكمية المتاحة تفي بفلتر NOTIONAL (القيمة الإجمالية)
+                # إذا كانت القيمة أقل من الحد الأدنى، لا نحاول البيع
+                notional_value = available_quantity * close_price
+                if notional_value < MINIMUM_NOTIONAL_VALUE:
+                    logging.critical(f"CRITICAL: Cannot sell #{trade_id}. Notional value (${notional_value:.2f}) is below Binance minimum (${MINIMUM_NOTIONAL_VALUE}). Asset left: {available_quantity}")
+                    # في هذه الحالة، لا يوجد داعي للمحاولة مرة أخرى، وننتقل لتسجيل الفشل
+                    break 
+
+                # 4. إرسال أمر بيع لكامل الكمية المتاحة فعلياً
+                formatted_quantity = bot_data.exchange.amount_to_precision(symbol, available_quantity)
+                await bot_data.exchange.create_market_sell_order(symbol, formatted_quantity)
+
+                # ... (باقي منطق النجاح كما هو)
+                pnl = (close_price - trade['entry_price']) * trade['quantity']
+                pnl_percent = (close_price / trade['entry_price'] - 1) * 100 if trade['entry_price'] > 0 else 0
+                emoji = "✅" if pnl > 0 else "🛑"
+                
+                async with aiosqlite.connect(DB_FILE) as conn:
+                    await conn.execute("UPDATE trades SET status = ?, close_price = ?, pnl_usdt = ? WHERE id = ?", (reason, close_price, pnl, trade_id))
+                    await conn.commit()
+
+                await self.sync_subscriptions()
+                await safe_send_message(bot, f"{emoji} **تم إغلاق الصفقة | #{trade_id} {symbol}**\n**السبب:** {reason}\n**الربح/الخسارة:** `${pnl:,.2f}` ({pnl_percent:+.2f}%)")
+                return
+
+            except Exception as e:
+                logger.warning(f"Failed to close trade #{trade_id}. Retrying... ({i + 1}/{bot_data.settings.get('close_retries', 3)})", exc_info=True)
+                await asyncio.sleep(5)
+
+        logger.critical(f"CRITICAL: Failed to close trade #{trade_id} after retries.")
+        async with aiosqlite.connect(DB_FILE) as conn:
+            await conn.execute("UPDATE trades SET status = 'closure_failed' WHERE id = ?", (trade_id,))
+            await conn.commit()
+        await safe_send_message(bot, f"🚨 **فشل حرج** 🚨\nفشل إغلاق الصفقة `#{trade_id}` بعد عدة محاولات. الرجاء مراجعة المنصة يدوياً.")
+        await self.sync_subscriptions()
+
+    async def run_public_ws(self):
+        self.is_running = True
+        while self.is_running:
+            stream_name = '/'.join([f"{s.lower().replace('/', '')}@ticker" for s in self.subscriptions])
+            if not stream_name:
+                await asyncio.sleep(5); continue
+
+            uri = f"wss://stream.binance.com:9443/ws/{stream_name}"
+            try:
+                async with websockets.connect(uri) as ws:
+                    self.public_ws = ws
+                    
+                    # [تأكيد الاتصال والمزامنة الفورية عند البدء]
+                    # هذا يضمن أن رسالة "Connected" تظهر فقط عندما يكون الاتصال ناجحًا.
+                    await self.sync_subscriptions(reconnect=True) 
+                    logger.info(f"✅ [Guardian's Eyes] Connected. Watching {len(self.subscriptions)} symbols.")
                     
                     async for message in ws:
                         await self.handle_ticker_update(message)
@@ -1106,6 +1254,7 @@ class TradeGuardian:
         self.is_running = False
         if self.public_ws:
             await self.public_ws.close()
+
 
 async def the_supervisor_job(context: ContextTypes.DEFAULT_TYPE):
     """المشرف: يضمن عدم وجود صفقات عالقة."""
@@ -2080,3 +2229,4 @@ class TradingHealthMonitor:
 # إنشاء مثيل من مراقب الصحة
 health_monitor = TradingHealthMonitor()
 health_monitor.metrics['start_time'] = time.time()
+
