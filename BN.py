@@ -1810,7 +1810,12 @@ async def post_init(application: Application):
     try: await application.bot.send_message(TELEGRAM_CHAT_ID, "*🤖 بوت باينانس V6.6 (المحرك المدقق) - بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
     except Forbidden: logger.critical(f"FATAL: Bot not authorized for chat ID {TELEGRAM_CHAT_ID}."); return
     logger.info("--- Binance Intelligent Engine Bot V6.6 is now fully operational ---")
-
+async def post_shutdown(application: Application):
+    if bot_data.exchange:
+        await bot_data.exchange.close()
+    if bot_data.websocket_manager:
+        await bot_data.websocket_manager.stop()
+    logger.info("Bot has shut down gracefully.")
 def main():
     logger.info("Starting Binance Adaptive Bot V6.6...")
     app_builder = Application.builder().token(TELEGRAM_BOT_TOKEN)
@@ -1826,3 +1831,4 @@ def main():
     
 if __name__ == '__main__':
     main()
+
