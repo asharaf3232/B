@@ -1254,11 +1254,21 @@ async def check_trade_details(update: Update, context: ContextTypes.DEFAULT_TYPE
         conn.row_factory = aiosqlite.Row
         cursor = await conn.execute("SELECT * FROM trades WHERE id = ?", (trade_id,))
         trade = await cursor.fetchone()
+
     if not trade:
         await query.answer("لم يتم العثور على الصفقة."); return
+        
     trade = dict(trade)
+
+    keyboard = [
+        [InlineKeyboardButton("🚨 بيع فوري (بسعر السوق)", callback_data=f"manual_sell_confirm_{trade_id}")],
+        [InlineKeyboardButton("🔙 العودة للصفقات", callback_data="db_trades")]
+    ]
+
     if trade['status'] == 'pending':
         message = f"**⏳ حالة الصفقة #{trade_id}**\n- **العملة:** `{trade['symbol']}`\n- **الحالة:** في انتظار تأكيد التنفيذ..."
+        # For pending trades, we don't need the keyboard with the sell button
+        keyboard = [[InlineKeyboardButton("🔙 العودة للصفقات", callback_data="db_trades")]]
     else:
         try:
             ticker = await bot_data.exchange.fetch_ticker(trade['symbol'])
@@ -1283,8 +1293,7 @@ async def check_trade_details(update: Update, context: ContextTypes.DEFAULT_TYPE
             f"----------------------------------\n"
             f"{pnl_text}"
         )
-    await safe_edit_message(query, message, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 العودة للصفقات", callback_data="db_trades")]]))
-
+    await safe_edit_message(query, message, reply_markup=InlineKeyboardMarkup(keyboard))
 async def show_mood_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer("جاري تحليل مزاج السوق...")
@@ -1751,14 +1760,14 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     try:
         if data in route_map: await route_map[data](update, context)
         elif data.startswith("check_"): await check_trade_details(update, context)
+        elif data.startswith("manual_sell_confirm_"): await handle_manual_sell_confirmation(update, context)
+        elif data.startswith("manual_sell_execute_"): await handle_manual_sell_execute(update, context)
         elif data.startswith("scanner_toggle_"): await handle_scanner_toggle(update, context)
         elif data.startswith("preset_set_"): await handle_preset_set(update, context)
         elif data.startswith("param_set_"): await handle_parameter_selection(update, context)
         elif data.startswith("param_toggle_"): await handle_toggle_parameter(update, context)
         elif data.startswith("strategy_adjust_"): await handle_strategy_adjustment(update, context)
     except Exception as e: logger.error(f"Error in button callback handler for data '{data}': {e}", exc_info=True)
-
-
 async def post_init(application: Application):
     logger.info("Performing post-initialization setup for Intelligent Engine Bot...")
     if not all([TELEGRAM_BOT_TOKEN, BINANCE_API_KEY, BINANCE_API_SECRET]):
@@ -1831,6 +1840,3 @@ def main():
     
 if __name__ == '__main__':
     main()
-
-
-
