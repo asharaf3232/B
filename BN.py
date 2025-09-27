@@ -573,7 +573,7 @@ async def worker_batch(queue, signals_list, errors_list):
                     risk = atr * settings['atr_sl_multiplier']
                     stop_loss, take_profit = entry_price - risk, entry_price + (risk * settings['risk_reward_ratio'])
                     signals_list.append({"symbol": symbol, "entry_price": entry_price, "take_profit": take_profit, "stop_loss": stop_loss, "reason": reason_str, "strength": strength, "weight": 1.0})
-                    queue.task_done(); continue
+                    queue.task_done();
 
             if spread_percent > settings['spread_filter']['max_spread_percent']:
                 queue.task_done(); continue
@@ -1831,5 +1831,6 @@ def main():
     
 if __name__ == '__main__':
     main()
+
 
 
