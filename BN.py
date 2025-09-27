@@ -775,7 +775,7 @@ async def initiate_real_trade(signal):
 
         # --- [الإصلاح الحاسم] التحقق من الحد الأدنى لقيمة الصفقة ---
         try:
-            market = await exchange.market(signal['symbol'])
+            market = exchange.market(signal['symbol'])
             min_notional_str = market.get('limits', {}).get('notional', {}).get('min')
             
             if min_notional_str is not None:
@@ -1831,4 +1831,5 @@ def main():
     
 if __name__ == '__main__':
     main()
+
 
