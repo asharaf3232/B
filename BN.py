@@ -1743,13 +1743,11 @@ async def universal_text_handler(update: Update, context: ContextTypes.DEFAULT_T
     if text == "Dashboard 🖥️": await show_dashboard_command(update, context)
     elif text == "الإعدادات ⚙️": await show_settings_menu(update, context)
 
-# ==============================================================================
-# --- [تمت الإضافة هنا بالترتيب الصحيح] دوال معالجة البيع اليدوي ---
-# ==============================================================================
 async def handle_manual_sell_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """يعرض رسالة تأكيد قبل البيع اليدوي."""
     query = update.callback_query
-    trade_id = int(query.data.split('_')[1])
+    # [تم الإصلاح] الحصول على الرقم من آخر جزء في النص
+    trade_id = int(query.data.split('_')[-1])
     
     async with aiosqlite.connect(DB_FILE) as conn:
         cursor = await conn.execute("SELECT symbol FROM trades WHERE id = ?", (trade_id,))
@@ -1770,7 +1768,8 @@ async def handle_manual_sell_confirmation(update: Update, context: ContextTypes.
 async def handle_manual_sell_execute(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """ينفذ البيع اليدوي ويغلق الصفقة."""
     query = update.callback_query
-    trade_id = int(query.data.split('_')[1])
+    # [تم الإصلاح] الحصول على الرقم من آخر جزء في النص
+    trade_id = int(query.data.split('_')[-1])
     
     await safe_edit_message(query, "⏳ جاري إرسال أمر البيع...", reply_markup=None)
 
@@ -1797,7 +1796,7 @@ async def handle_manual_sell_execute(update: Update, context: ContextTypes.DEFAU
         logger.error(f"Manual sell execution failed for trade #{trade_id}: {e}", exc_info=True)
         await safe_send_message(context.bot, f"🚨 فشل البيع اليدوي للصفقة #{trade_id}. السبب: {e}")
         await query.answer("🚨 فشل أمر البيع. راجع السجلات.", show_alert=True)
-
+        
 # ==============================================================================
 # --- دالة موجه الأزرار الرئيسية ---
 # ==============================================================================
