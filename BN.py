@@ -1064,10 +1064,29 @@ class BinanceWebSocketManager:
     async def _close_trade(self, trade, reason, close_price):
         symbol, trade_id = trade['symbol'], trade['id']
         bot = self.application.bot
+        
+        # --- [الإصلاح الحاسم] منع سباق المهام (Race Condition) ---
+        # 1. تحديث الحالة فوراً لمنع أي محاولة إغلاق أخرى لنفس الصفقة
+        try:
+            async with aiosqlite.connect(DB_FILE) as conn:
+                cursor = await conn.execute("UPDATE trades SET status = 'closing' WHERE id = ? AND status = 'active'", (trade_id,))
+                await conn.commit()
+                # إذا لم يتم تحديث أي صف (لأنها لم تكن نشطة)، فهذا يعني أن عملية إغلاق أخرى قد بدأت بالفعل
+                if cursor.rowcount == 0:
+                    logger.warning(f"Closure for trade #{trade_id} ignored; another process is already closing it.")
+                    return
+        except Exception as e:
+            logger.error(f"CRITICAL DB LOCK FAILED for trade #{trade_id}: {e}")
+            return
+        # --- [نهاية الإصلاح] ---
+
         logger.info(f"Guardian: Attempting to close trade #{trade_id} for {symbol}. Reason: {reason}")
         quantity_to_sell = float(bot_data.exchange.amount_to_precision(symbol, trade['quantity']))
+        
+        # --- [إصلاح الخطأ الثانوي] إزالة await من دالة market المتزامنة ---
         try:
-            market = await bot_data.exchange.market(symbol)
+            # الدالة market لا تحتاج await لأنها تقرأ من الذاكرة
+            market = bot_data.exchange.market(symbol)
             min_notional = float(market.get('limits', {}).get('notional', {}).get('min', 0.0))
             if min_notional > 0 and (quantity_to_sell * close_price) < min_notional:
                 logger.critical(f"Closure for trade #{trade_id} aborted: Notional value is below minimum. Manual review needed.")
@@ -1079,6 +1098,7 @@ class BinanceWebSocketManager:
                 return
         except Exception as e:
             logger.error(f"Failed to check market rules for trade #{trade_id}: {e}")
+        # --- [نهاية الإصلاح] ---
 
         for i in range(bot_data.settings.get('close_retries', 3)):
             try:
