@@ -830,6 +830,25 @@ async def initiate_real_trade(signal):
         trade_weight = signal.get('weight', 1.0)
         trade_size = base_trade_size * trade_weight if settings.get('dynamic_trade_sizing_enabled', True) else base_trade_size
 
+        # --- [الإضافة الجديدة] جلب قواعد السوق للعملة ---
+        try:
+            market = await exchange.market(signal['symbol'])
+            min_notional_str = market.get('limits', {}).get('notional', {}).get('min')
+            
+            # التأكد من وجود قيمة للحد الأدنى
+            if min_notional_str is not None:
+                min_notional_value = float(min_notional_str)
+                # إضافة هامش أمان (مثلاً 5%) لتجنب المشاكل عند الإغلاق
+                required_size = min_notional_value * 1.05 
+                
+                if trade_size < required_size:
+                    logger.warning(f"Trade for {signal['symbol']} aborted. Trade size ({trade_size:.2f} USDT) is below the required minimum notional value with safety margin ({required_size:.2f} USDT).")
+                    return False
+        except Exception as e:
+            logger.error(f"Could not fetch market rules for {signal['symbol']}: {e}. Skipping trade to be safe.")
+            return False
+        # --- [نهاية الإضافة] ---
+
         balance = await exchange.fetch_balance()
         usdt_balance = balance.get('USDT', {}).get('free', 0.0)
 
@@ -1826,4 +1845,5 @@ def main():
     
 if __name__ == '__main__':
     main()
+
 
