@@ -1743,6 +1743,64 @@ async def universal_text_handler(update: Update, context: ContextTypes.DEFAULT_T
     if text == "Dashboard 🖥️": await show_dashboard_command(update, context)
     elif text == "الإعدادات ⚙️": await show_settings_menu(update, context)
 
+# ==============================================================================
+# --- [تمت الإضافة هنا بالترتيب الصحيح] دوال معالجة البيع اليدوي ---
+# ==============================================================================
+async def handle_manual_sell_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """يعرض رسالة تأكيد قبل البيع اليدوي."""
+    query = update.callback_query
+    trade_id = int(query.data.split('_')[1])
+    
+    async with aiosqlite.connect(DB_FILE) as conn:
+        cursor = await conn.execute("SELECT symbol FROM trades WHERE id = ?", (trade_id,))
+        trade_data = await cursor.fetchone()
+
+    if not trade_data:
+        await query.answer("لم يتم العثور على الصفقة.", show_alert=True); return
+
+    symbol = trade_data[0]
+    message = f"🛑 **تأكيد البيع الفوري** 🛑\n\nهل أنت متأكد أنك تريد بيع صفقة `{symbol}` رقم `#{trade_id}` بسعر السوق الحالي؟"
+    
+    keyboard = [
+        [InlineKeyboardButton("✅ نعم، قم بالبيع الآن", callback_data=f"manual_sell_execute_{trade_id}")],
+        [InlineKeyboardButton("❌ لا، تراجع", callback_data=f"check_{trade_id}")]
+    ]
+    await safe_edit_message(query, message, reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def handle_manual_sell_execute(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """ينفذ البيع اليدوي ويغلق الصفقة."""
+    query = update.callback_query
+    trade_id = int(query.data.split('_')[1])
+    
+    await safe_edit_message(query, "⏳ جاري إرسال أمر البيع...", reply_markup=None)
+
+    async with aiosqlite.connect(DB_FILE) as conn:
+        conn.row_factory = aiosqlite.Row
+        trade = await (await conn.execute("SELECT * FROM trades WHERE id = ? AND status = 'active'", (trade_id,))).fetchone()
+
+    if not trade:
+        await query.answer("لم يتم العثور على الصفقة أو أنها ليست نشطة.", show_alert=True)
+        # Recreate a fake update object to call check_trade_details
+        fake_update = Update(update.update_id, callback_query=type('Query', (), {'data': f"check_{trade_id}", 'message': query.message, 'edit_message_text': query.edit_message_text, 'answer': query.answer})())
+        await check_trade_details(fake_update, context)
+        return
+
+    try:
+        trade = dict(trade)
+        ticker = await bot_data.exchange.fetch_ticker(trade['symbol'])
+        current_price = ticker['last']
+
+        # استدعاء دالة الإغلاق الموجودة بالفعل في البوت
+        await bot_data.websocket_manager._close_trade(trade, "إغلاق يدوي", current_price)
+        await query.answer("✅ تم إرسال أمر البيع بنجاح!")
+    except Exception as e:
+        logger.error(f"Manual sell execution failed for trade #{trade_id}: {e}", exc_info=True)
+        await safe_send_message(context.bot, f"🚨 فشل البيع اليدوي للصفقة #{trade_id}. السبب: {e}")
+        await query.answer("🚨 فشل أمر البيع. راجع السجلات.", show_alert=True)
+
+# ==============================================================================
+# --- دالة موجه الأزرار الرئيسية ---
+# ==============================================================================
 async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query; await query.answer(); data = query.data
     route_map = {
@@ -1768,6 +1826,10 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         elif data.startswith("param_toggle_"): await handle_toggle_parameter(update, context)
         elif data.startswith("strategy_adjust_"): await handle_strategy_adjustment(update, context)
     except Exception as e: logger.error(f"Error in button callback handler for data '{data}': {e}", exc_info=True)
+
+# ==============================================================================
+# --- دوال التشغيل والإيقاف الرئيسية ---
+# ==============================================================================
 async def post_init(application: Application):
     logger.info("Performing post-initialization setup for Intelligent Engine Bot...")
     if not all([TELEGRAM_BOT_TOKEN, BINANCE_API_KEY, BINANCE_API_SECRET]):
@@ -1783,14 +1845,12 @@ async def post_init(application: Application):
         'apiKey': BINANCE_API_KEY,
         'secret': BINANCE_API_SECRET,
         'enableRateLimit': True,
-        # [تم الإصلاح] تغيير 'future' إلى 'spot' للعمل على السوق الفوري
         'options': { 'defaultType': 'spot', 'timeout': 30000 }
     })
 
     try:
         await bot_data.exchange.load_markets()
         await bot_data.exchange.fetch_balance()
-        # [تم الإصلاح] تحديث رسالة السجل لتعكس الاتصال الصحيح
         logger.info("✅ Successfully connected to Binance Spot.")
     except Exception as e:
         logger.critical(f"🔥 FATAL: Could not connect to Binance: {e}", exc_info=True); return
@@ -1798,7 +1858,6 @@ async def post_init(application: Application):
     load_settings()
     await init_database()
 
-    # Create and run the unified WebSocket manager
     bot_data.websocket_manager = BinanceWebSocketManager(bot_data.exchange, application)
     asyncio.create_task(bot_data.websocket_manager.run())
     
@@ -1819,12 +1878,14 @@ async def post_init(application: Application):
     try: await application.bot.send_message(TELEGRAM_CHAT_ID, "*🤖 بوت باينانس V6.6 (المحرك المدقق) - بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
     except Forbidden: logger.critical(f"FATAL: Bot not authorized for chat ID {TELEGRAM_CHAT_ID}."); return
     logger.info("--- Binance Intelligent Engine Bot V6.6 is now fully operational ---")
+
 async def post_shutdown(application: Application):
     if bot_data.exchange:
         await bot_data.exchange.close()
     if bot_data.websocket_manager:
         await bot_data.websocket_manager.stop()
     logger.info("Bot has shut down gracefully.")
+
 def main():
     logger.info("Starting Binance Adaptive Bot V6.6...")
     app_builder = Application.builder().token(TELEGRAM_BOT_TOKEN)
