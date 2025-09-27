@@ -1,19 +1,14 @@
 # -*- coding: utf-8 -*-
 # =======================================================================================
-# --- 🚀 بوت التداول النهائي V6.3 (Intelligent Engine - Patched) 🚀 ---
+# --- 🚀 بوت التداول النهائي V6.5 (Intelligent Engine - Hardened) 🚀 ---
 # =======================================================================================
 #
-# هذا الإصدار يدمج تحسينات جوهرية لمعالجة حالات الحافة الحرجة وزيادة ذكاء التداول.
-#
-# --- سجل التغييرات للإصدار 6.3 (المحرك الذكي) ---
-#   ✅ [ذكي] **حل مشكلة فشل الإغلاق:** تم تعديل دالة `_close_trade` لتنسيق كمية البيع
-#     وفقًا لقواعد المنصة (LOT_SIZE, MIN_NOTIONAL)، مما يمنع الفشل الحرج.
-#   ✅ [ذكي] **منع الصفقات المكررة:** تمت إضافة فحص قبل فتح أي صفقة جديدة للتأكد
-#     من عدم وجود صفقة نشطة بالفعل لنفس العملة.
-#   ✅ [ذكي] **وقف خسارة متحرك مطور:** تم استبدال النظام القديم بآخر أكثر مرونة
-#     يمنح الصفقات الرابحة مساحة للنمو ويمنع الإغلاق المبكر.
-#   ✅ [موثوقية] **آلية شراء معززة:** تم تحسين منطق بدء الصفقات لضمان التعامل
-#     السليم مع الأخطاء وتسجيل الصفقات بشكل آمن.
+# --- سجل التغييرات للإصدار 6.5 (المحرك المحصّن) ---
+#   ✅ [إصلاح حاسم] **منع تكرار الصفقات بشكل نهائي:** تم إضافة "ذاكرة فورية" لدورة الفحص
+#     لمنع حالات السباق (Race Condition) التي كانت تسمح بفتح عدة صفقات لنفس العملة
+#     قبل تحديث قاعدة البيانات.
+#   ✅ [تحسين] **إصلاح اتصال الحارس عند بدء التشغيل:** تم إضافة مزامنة أولية للحارس
+#     لضمان اتصاله ومراقبته للصفقات النشطة المتبقية من الجلسات السابقة فوراً.
 #
 # =======================================================================================
 
@@ -92,8 +87,8 @@ DEFAULT_SETTINGS = {
     "atr_sl_multiplier": 2.5,
     "risk_reward_ratio": 2.0,
     "trailing_sl_enabled": True,
-    "trailing_sl_activation_percent": 2.0, # تم التعديل
-    "trailing_sl_callback_percent": 1.5,  # تم التعديل
+    "trailing_sl_activation_percent": 2.0,
+    "trailing_sl_callback_percent": 1.5,
     "active_scanners": ["momentum_breakout", "breakout_squeeze_pro", "support_rebound", "sniper_pro", "whale_radar", "rsi_divergence", "supertrend_pullback"],
     "market_mood_filter_enabled": True,
     "fear_and_greed_threshold": 30,
@@ -811,14 +806,8 @@ async def activate_trade(order_id, symbol):
     )
     await safe_send_message(bot, success_msg)
 
-# =================================================================
-# [التحسين رقم 2] دالة مساعدة للتحقق من وجود صفقة نشطة
-# =================================================================
 async def has_active_trade_for_symbol(symbol: str) -> bool:
-    """
-    Checks the database to see if there is already an 'active' or 'pending' 
-    trade for the given symbol.
-    """
+    """Checks the database for an existing 'active' or 'pending' trade for the given symbol."""
     try:
         async with aiosqlite.connect(DB_FILE) as conn:
             cursor = await conn.execute(
@@ -829,7 +818,6 @@ async def has_active_trade_for_symbol(symbol: str) -> bool:
             return result is not None
     except Exception as e:
         logger.error(f"Database check for active trade failed for {symbol}: {e}")
-        # في حالة الشك أو حدوث خطأ، نفترض وجود صفقة لمنع الشراء الخاطئ
         return True
 
 async def initiate_real_trade(signal):
@@ -917,23 +905,37 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
         trades_opened_count = 0
         signals_found.sort(key=lambda s: s.get('strength', 0), reverse=True)
 
+        # --- [الإصلاح الحاسم V6.5] منع تكرار الصفقات داخل نفس دورة الفحص ---
+        symbols_being_traded_in_this_scan = set()
+
         for signal in signals_found:
             if active_trades_count >= settings['max_concurrent_trades']:
                 logger.info(f"Stopping trade initiation, max concurrent trades ({active_trades_count}) reached.")
                 break
             
-            # --- [التحسين رقم 2] تطبيق فحص الصفقات المكررة ---
-            if await has_active_trade_for_symbol(signal['symbol']):
-                logger.info(f"Signal for {signal['symbol']} ignored: An active trade for this symbol already exists.")
+            symbol_to_trade = signal['symbol']
+
+            if symbol_to_trade in symbols_being_traded_in_this_scan:
+                logger.warning(f"Signal for {symbol_to_trade} ignored: A trade for this symbol is already being processed in THIS scan cycle.")
                 continue
-            # --- نهاية التحسين ---
+
+            if await has_active_trade_for_symbol(symbol_to_trade):
+                logger.info(f"Signal for {symbol_to_trade} ignored: An active trade for this symbol already exists in the database.")
+                continue
             
-            if time.time() - bot_data.last_signal_time.get(signal['symbol'], 0) > (SCAN_INTERVAL_SECONDS * 0.9):
-                bot_data.last_signal_time[signal['symbol']] = time.time()
+            if time.time() - bot_data.last_signal_time.get(symbol_to_trade, 0) > (SCAN_INTERVAL_SECONDS * 0.9):
+                bot_data.last_signal_time[symbol_to_trade] = time.time()
+                
+                symbols_being_traded_in_this_scan.add(symbol_to_trade)
+
                 if await initiate_real_trade(signal):
                     active_trades_count += 1
                     trades_opened_count += 1
+                else:
+                    symbols_being_traded_in_this_scan.remove(symbol_to_trade)
+
                 await asyncio.sleep(2)
+        # --- نهاية الإصلاح ---
 
         scan_duration = time.time() - scan_start_time
         bot_data.last_scan_info = {"start_time": datetime.fromtimestamp(scan_start_time, EGYPT_TZ).strftime('%Y-%m-%d %H:%M:%S'), "duration_seconds": int(scan_duration), "checked_symbols": len(top_markets), "analysis_errors": len(analysis_errors)}
@@ -971,28 +973,24 @@ class TradeGuardian:
                     trade = dict(trade)
                     settings = bot_data.settings
 
-                    # --- [التحسين رقم 3] منطق وقف الخسارة المتحرك الذكي ---
                     if settings['trailing_sl_enabled']:
                         highest_price = max(trade.get('highest_price', 0), current_price)
                         if highest_price > trade.get('highest_price', 0):
                             await conn.execute("UPDATE trades SET highest_price = ? WHERE id = ?", (highest_price, trade['id']))
 
-                        # 1. تفعيل الـ Trailing لأول مرة
                         if not trade.get('trailing_sl_active', False) and current_price >= trade['entry_price'] * (1 + settings['trailing_sl_activation_percent'] / 100):
-                            new_sl = trade['entry_price'] * 1.001 # نرفعه أعلى بقليل من الدخول
+                            new_sl = trade['entry_price'] * 1.001
                             if new_sl > trade['stop_loss']:
                                 await conn.execute("UPDATE trades SET trailing_sl_active = 1, stop_loss = ? WHERE id = ?", (new_sl, trade['id']))
                                 await safe_send_message(self.application.bot, f"🚀 **تأمين الأرباح! | #{trade['id']} {trade['symbol']}**\nتم رفع وقف الخسارة إلى نقطة الدخول: `${new_sl:.4f}`")
                                 trade['trailing_sl_active'] = True
                                 trade['stop_loss'] = new_sl
                         
-                        # 2. تحديث الـ Trailing Stop إذا كان مفعّلاً
                         if trade.get('trailing_sl_active', False):
                             new_sl_candidate = highest_price * (1 - settings['trailing_sl_callback_percent'] / 100)
                             if new_sl_candidate > trade['stop_loss']:
                                 trade['stop_loss'] = new_sl_candidate
                                 await conn.execute("UPDATE trades SET stop_loss = ? WHERE id = ?", (new_sl_candidate, trade['id']))
-                    # --- نهاية التحسين رقم 3 ---
                     
                     if settings.get('incremental_notifications_enabled', True):
                         last_notified = trade.get('last_profit_notification_price', trade['entry_price'])
@@ -1004,7 +1002,6 @@ class TradeGuardian:
                     
                     await conn.commit()
                 
-                # التحقق من الأهداف خارج اتصال قاعدة البيانات لتجنب القفل
                 if current_price >= trade['take_profit']: 
                     await self._close_trade(trade, "ناجحة (TP)", current_price)
                 elif current_price <= trade['stop_loss']:
@@ -1016,7 +1013,6 @@ class TradeGuardian:
             except Exception as e:
                 logger.error(f"Guardian Ticker Error for {symbol}: {e}", exc_info=True)
     
-    # --- [التحسين رقم 1] دالة إغلاق الصفقات الذكية ---
     async def _close_trade(self, trade, reason, close_price):
         symbol, trade_id = trade['symbol'], trade['id']
         bot = self.application.bot
@@ -1071,7 +1067,6 @@ class TradeGuardian:
             await conn.commit()
         await safe_send_message(bot, f"🚨 **فشل حرج** 🚨\nفشل إغلاق الصفقة `#{trade_id}` بعد عدة محاولات. الرجاء مراجعة المنصة يدوياً.")
         await self.sync_subscriptions()
-    # --- نهاية التحسين رقم 1 ---
 
     async def run_public_ws(self):
         self.is_running = True
@@ -1144,7 +1139,7 @@ async def the_supervisor_job(context: ContextTypes.DEFAULT_TYPE):
 # --- واجهة تليجرام المتقدمة (بدون تغيير) ---
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [["Dashboard 🖥️"], ["الإعدادات ⚙️"]]
-    await update.message.reply_text("أهلاً بك في **بوت باينانس V6.3 (المحرك الذكي)**", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True), parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text("أهلاً بك في **بوت باينانس V6.5 (المحرك المحصّن)**", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True), parse_mode=ParseMode.MARKDOWN)
 
 async def manual_scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not bot_data.trading_enabled: await (update.message or update.callback_query.message).reply_text("🔬 الفحص محظور. مفتاح الإيقاف مفعل."); return
@@ -1789,17 +1784,11 @@ async def post_init(application: Application):
     bot_data.trade_guardian = TradeGuardian(application)
     bot_data.user_data_stream = UserDataStreamManager(bot_data.exchange, handle_order_update)
 
-    # --- [الإصلاح الحاسم V6.4] المزامنة الأولية للحارس قبل بدء التشغيل ---
-    # هذا يضمن أن الحارس يبدأ وهو على علم بالصفقات النشطة المتبقية من الجلسة السابقة
     logger.info("Guardian: Performing initial sync for active trades...")
     await bot_data.trade_guardian.sync_subscriptions()
     logger.info(f"Guardian: Initial sync complete. Found {len(bot_data.trade_guardian.subscriptions)} active trades to monitor.")
-    # --- نهاية الإصلاح ---
 
-    # 1. إطلاق مهمة الحارس (الـ Public WS)
     asyncio.create_task(bot_data.trade_guardian.run_public_ws())
-    
-    # 2. إطلاق مهمة UDS (الـ Private WS)
     asyncio.create_task(bot_data.user_data_stream.run())
 
     logger.info("Waiting 10s for WebSocket connections..."); await asyncio.sleep(10)
@@ -1812,9 +1801,9 @@ async def post_init(application: Application):
     jq.run_repeating(propose_strategy_changes, interval=STRATEGY_ANALYSIS_INTERVAL_SECONDS, first=120, name="propose_strategy_changes")
 
     logger.info(f"All jobs scheduled. Supervisor running every {SUPERVISOR_INTERVAL_SECONDS}s.")
-    try: await application.bot.send_message(TELEGRAM_CHAT_ID, "*🤖 بوت باينانس V6.3 (المحرك الذكي) - بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
+    try: await application.bot.send_message(TELEGRAM_CHAT_ID, "*🤖 بوت باينانس V6.5 (المحرك المحصّن) - بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
     except Forbidden: logger.critical(f"FATAL: Bot not authorized for chat ID {TELEGRAM_CHAT_ID}."); return
-    logger.info("--- Binance Intelligent Engine Bot V6.3 is now fully operational ---")
+    logger.info("--- Binance Intelligent Engine Bot V6.5 is now fully operational ---")
 
 async def post_shutdown(application: Application):
     if bot_data.exchange: await bot_data.exchange.close()
@@ -1823,7 +1812,7 @@ async def post_shutdown(application: Application):
     logger.info("Bot has shut down gracefully.")
 
 def main():
-    logger.info("Starting Binance Adaptive Bot V6.3...")
+    logger.info("Starting Binance Adaptive Bot V6.5...")
     app_builder = Application.builder().token(TELEGRAM_BOT_TOKEN)
     app_builder.post_init(post_init).post_shutdown(post_shutdown)
     application = app_builder.build()
