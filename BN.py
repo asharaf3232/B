@@ -1789,7 +1789,17 @@ async def post_init(application: Application):
     bot_data.trade_guardian = TradeGuardian(application)
     bot_data.user_data_stream = UserDataStreamManager(bot_data.exchange, handle_order_update)
 
+    # --- [الإصلاح الحاسم V6.4] المزامنة الأولية للحارس قبل بدء التشغيل ---
+    # هذا يضمن أن الحارس يبدأ وهو على علم بالصفقات النشطة المتبقية من الجلسة السابقة
+    logger.info("Guardian: Performing initial sync for active trades...")
+    await bot_data.trade_guardian.sync_subscriptions()
+    logger.info(f"Guardian: Initial sync complete. Found {len(bot_data.trade_guardian.subscriptions)} active trades to monitor.")
+    # --- نهاية الإصلاح ---
+
+    # 1. إطلاق مهمة الحارس (الـ Public WS)
     asyncio.create_task(bot_data.trade_guardian.run_public_ws())
+    
+    # 2. إطلاق مهمة UDS (الـ Private WS)
     asyncio.create_task(bot_data.user_data_stream.run())
 
     logger.info("Waiting 10s for WebSocket connections..."); await asyncio.sleep(10)
@@ -1827,3 +1837,4 @@ def main():
     
 if __name__ == '__main__':
     main()
+
