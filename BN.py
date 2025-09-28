@@ -1146,11 +1146,12 @@ class BinanceWebSocketManager:
             await safe_send_message(bot, f"{emoji} **تم إغلاق الصفقة | #{trade_id} {symbol}**\n**السبب:** {reason}\n**الربح/الخسارة:** `${pnl:,.2f}` ({pnl_percent:+.2f}%)")
 
         except Exception as e:
-            logger.critical(f"CRITICAL: The robust closure process for trade #{trade_id} failed entirely: {e}", exc_info=True)
+            logger.critical(f"CRITICAL: The robust closure process for trade #{trade_id} failed entirely. MOVING TO INCUBATOR: {e}", exc_info=True)
             async with aiosqlite.connect(DB_FILE) as conn:
-                await conn.execute("UPDATE trades SET status = 'closure_failed' WHERE id = ?", (trade_id,))
+                # --- [التعديل] تغيير الحالة إلى "تحت الحضانة" بدلاً من "فشل" ---
+                await conn.execute("UPDATE trades SET status = 'incubated' WHERE id = ?", (trade_id,))
                 await conn.commit()
-            await safe_send_message(bot, f"🚨 **فشل حرج ونهائي** 🚨\nفشل إغلاق الصفقة `#{trade_id}` حتى بعد عملية التنظيف. الرجاء مراجعة المنصة فوراً.")
+            await safe_send_message(bot, f"⚠️ **فشل الإغغلاق | #{trade_id} {symbol}**\nسيتم نقل الصفقة إلى الحضانة للمراقبة ومحاولة التعافي.")
             await self.sync_subscriptions()
 
     async def sync_subscriptions(self):
@@ -1173,18 +1174,20 @@ class BinanceWebSocketManager:
 # =======================================================================================
 
 async def the_supervisor_job(context: ContextTypes.DEFAULT_TYPE):
-    """المشرف: يضمن عدم وجود صفقات عالقة."""
-    logger.info("🕵️ Supervisor: Auditing pending trades...")
+    """
+    المشرف: يضمن عدم وجود صفقات عالقة (pending) ويدير وحدة الحضانة والتعافي (incubated).
+    """
+    logger.info("🕵️ Supervisor: Running audit and recovery checks...")
+    
     async with aiosqlite.connect(DB_FILE) as conn:
         conn.row_factory = aiosqlite.Row
-        stuck_trades = await (await conn.execute("SELECT * FROM trades WHERE status = 'pending' AND timestamp <= ?", ((datetime.now(EGYPT_TZ) - timedelta(minutes=2)).isoformat(),))).fetchall()
+        
+        # --- 1. التحقق من الصفقات العالقة في حالة pending (المنطق القديم) ---
+        stuck_pending = await (await conn.execute("SELECT * FROM trades WHERE status = 'pending' AND timestamp <= ?", ((datetime.now(EGYPT_TZ) - timedelta(minutes=3)).isoformat(),))).fetchall()
 
-        if not stuck_trades:
-            logger.info("🕵️ Supervisor: Audit complete. No abandoned trades found."); return
-
-        for trade_data in stuck_trades:
+        for trade_data in stuck_pending:
             trade = dict(trade_data)
-            logger.warning(f"🕵️ Supervisor: Found abandoned trade #{trade['id']}. Investigating.")
+            logger.warning(f"🕵️ Supervisor: Found abandoned pending trade #{trade['id']}. Investigating.")
             try:
                 order_status = await bot_data.exchange.fetch_order(trade['order_id'], trade['symbol'])
                 if order_status['status'] == 'closed' and float(order_status.get('filled', 0)) > 0:
@@ -1192,12 +1195,42 @@ async def the_supervisor_job(context: ContextTypes.DEFAULT_TYPE):
                     await activate_trade(trade['order_id'], trade['symbol'])
                 elif order_status['status'] == 'canceled':
                     await conn.execute("UPDATE trades SET status = 'failed (canceled)' WHERE id = ?", (trade['id'],))
-                else:
+                else: # إذا كانت لا تزال مفتوحة، حاول إلغاءها
                     await bot_data.exchange.cancel_order(trade['order_id'], trade['symbol'])
                     await conn.execute("UPDATE trades SET status = 'failed (canceled by supervisor)' WHERE id = ?", (trade['id'],))
                 await conn.commit()
             except Exception as e:
-                logger.error(f"🕵️ Supervisor: Failed to rectify trade #{trade['id']}: {e}")
+                logger.error(f"🕵️ Supervisor: Failed to rectify pending trade #{trade['id']}: {e}")
+
+        # --- 2. إدارة الصفقات في الحضانة (المنطق الجديد) ---
+        incubated_trades = await (await conn.execute("SELECT * FROM trades WHERE status = 'incubated'")).fetchall()
+
+        if incubated_trades:
+            logger.warning(f"🕵️ Supervisor: Found {len(incubated_trades)} trades in the incubator. Starting recovery protocol...")
+            for trade_data in incubated_trades:
+                trade = dict(trade_data)
+                try:
+                    ticker = await bot_data.exchange.fetch_ticker(trade['symbol'])
+                    current_price = ticker['last']
+                    
+                    # الشرط الأول: هل تعافت الصفقة؟
+                    if current_price > trade['stop_loss']:
+                        await conn.execute("UPDATE trades SET status = 'active' WHERE id = ?", (trade['id'],))
+                        await conn.commit()
+                        await safe_send_message(context.bot, f"✅ **تعافي الصفقة | #{trade['id']} {trade['symbol']}**\nعادت للمراقبة النشطة بسعر حالي: ${current_price:.4f}")
+                        continue
+
+                    # الشرط الثاني: هل ما زالت تستدعي الإغلاق؟ (نعطيها فرصة للمحاولة مرة أخرى)
+                    else:
+                        logger.info(f"Supervisor: Trade #{trade['id']} is still below SL. Retrying gentle closure...")
+                        await bot_data.websocket_manager._close_trade(trade, f"فاشلة (SL-Incubator)", current_price)
+                
+                except Exception as e:
+                    logger.error(f"🕵️ Supervisor: Error processing incubated trade #{trade['id']}: {e}")
+                
+                await asyncio.sleep(5) # فاصل زمني بين كل محاولة لتجنب الضغط على الـ API
+    
+    logger.info("🕵️ Supervisor: Audit and recovery checks complete.")
 
 # ... (بقية كود واجهة تليجرام يبقى كما هو بدون تغيير جوهري) ...
 # --- واجهة تليجرام المتقدمة (بدون تغيير) ---
