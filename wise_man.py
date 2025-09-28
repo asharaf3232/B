@@ -40,7 +40,7 @@ class WiseMan:
         self.telegram_chat_id = application.bot_data.get('TELEGRAM_CHAT_ID')
         logger.info("🧠 Wise Man module initialized.")
 
-    async def review_open_trades(self):
+    async def review_open_trades(self, context: object = None):
         """
         الدالة الرئيسية التي تمر على كل الصفقات المفتوحة وتطبق المنطق التكتيكي.
         """
@@ -99,7 +99,7 @@ class WiseMan:
             await conn.commit()
         logger.info("🧠 Wise Man: Trade review complete.")
 
-    async def review_portfolio_risk(self):
+    async def review_portfolio_risk(self, context: object = None):
         """
         تقوم هذه الدالة بفحص المحفظة ككل وإعطاء تنبيهات حول التركيز.
         """
