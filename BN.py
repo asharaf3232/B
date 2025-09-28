@@ -866,69 +866,12 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
         trades_opened_count = 0
         signals_found.sort(key=lambda s: s.get('strength', 0), reverse=True)
 
-       async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
-    async with scan_lock:
-        if not bot_data.trading_enabled:
-            logger.warning("Scan skipped: Trading is disabled by circuit breaker or manually.")
-            return
-        
-        scan_start_time = time.time()
-        logger.info("--- Starting new Intelligent Engine scan... ---")
-        settings, bot = bot_data.settings, context.bot
-
-        try:
-            balance = await bot_data.exchange.fetch_balance()
-            usdt_balance = balance.get('USDT', {}).get('free', 0.0)
-            trade_size_min_check = settings['real_trade_size_usdt'] * 0.98
-            if usdt_balance < trade_size_min_check:
-                logger.error(f"Scan skipped: Insufficient USDT balance ({usdt_balance:,.2f} < {trade_size_min_check:,.2f}) to open a trade.")
-                return
-        except Exception as e:
-            logger.error(f"Failed to fetch balance for scan check: {e}"); return
-
-        if settings.get('news_filter_enabled', True):
-            mood_result_fundamental = await get_fundamental_market_mood()
-            if mood_result_fundamental['mood'] in ["NEGATIVE", "DANGEROUS"]:
-                bot_data.market_mood = mood_result_fundamental; return
-
-        mood_result = await get_market_mood()
-        bot_data.market_mood = mood_result
-        if mood_result['mood'] in ["NEGATIVE", "DANGEROUS"]: return
-
-        async with aiosqlite.connect(DB_FILE) as conn:
-            active_trades_count = (await (await conn.execute("SELECT COUNT(*) FROM trades WHERE status = 'active' OR status = 'pending'")).fetchone())[0]
-        
-        if active_trades_count >= settings['max_concurrent_trades']:
-            logger.info(f"Scan skipped: Max trades ({active_trades_count}) reached."); return
-
-        top_markets = await get_binance_markets()
-        if not top_markets:
-             logger.warning("Scan could not retrieve any markets to check.")
-             return
-
-        symbols_to_scan = [m['symbol'] for m in top_markets]
-        ohlcv_data = await fetch_ohlcv_batch(bot_data.exchange, symbols_to_scan, TIMEFRAME, 220)
-
-        queue, signals_found, analysis_errors = asyncio.Queue(), [], []
-        for market in top_markets:
-            if market['symbol'] in ohlcv_data:
-                await queue.put({'market': market, 'ohlcv': ohlcv_data[market['symbol']]})
-
-        worker_tasks = [asyncio.create_task(worker_batch(queue, signals_found, analysis_errors)) for _ in range(settings.get("worker_threads", 10))]
-        await queue.join()
-        for task in worker_tasks: task.cancel()
-
-        trades_opened_count = 0
-        signals_found.sort(key=lambda s: s.get('strength', 0), reverse=True)
-
-        # --- [الحل النهائي لمشكلة سباق الشراء V6.7] ---
-        balance_lock = asyncio.Lock()
-        available_slots = settings['max_concurrent_trades'] - active_trades_count
+        # [CRITICAL FIX V6.6] Prevent race condition within a single scan cycle
         symbols_being_traded_in_this_scan = set()
 
         for signal in signals_found:
-            if available_slots <= 0:
-                logger.info("Stopping trade initiation, max concurrent trade slots filled for this cycle.")
+            if active_trades_count >= settings['max_concurrent_trades']:
+                logger.info(f"Stopping trade initiation, max concurrent trades ({active_trades_count}) reached.")
                 break
             
             symbol_to_trade = signal['symbol']
@@ -942,32 +885,18 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
                 continue
             
             if time.time() - bot_data.last_signal_time.get(symbol_to_trade, 0) > (SCAN_INTERVAL_SECONDS * 0.9):
-                async with balance_lock:
-                    try:
-                        # التحقق من الرصيد الفعلي مباشرة قبل إرسال الأمر
-                        balance = await bot_data.exchange.fetch_balance()
-                        usdt_balance = balance.get('USDT', {}).get('free', 0.0)
-                        required_size = settings['real_trade_size_usdt']
+                bot_data.last_signal_time[symbol_to_trade] = time.time()
+                
+                symbols_being_traded_in_this_scan.add(symbol_to_trade)
 
-                        if usdt_balance >= required_size:
-                            logger.info(f"Balance OK ({usdt_balance:.2f} USDT). Proceeding with trade for {symbol_to_trade}.")
-                            bot_data.last_signal_time[symbol_to_trade] = time.time()
-                            symbols_being_traded_in_this_scan.add(symbol_to_trade)
+                if await initiate_real_trade(signal):
+                    active_trades_count += 1
+                    trades_opened_count += 1
+                else:
+                    symbols_being_traded_in_this_scan.remove(symbol_to_trade)
 
-                            if await initiate_real_trade(signal):
-                                trades_opened_count += 1
-                                available_slots -= 1 # تقليل عدد الصفقات المتاحة لهذه الدورة
-                            else:
-                                symbols_being_traded_in_this_scan.remove(symbol_to_trade)
-                            
-                            await asyncio.sleep(2) # إعطاء فرصة للمنصة لتحديث الرصيد
-                        else:
-                            logger.warning(f"Stopping trade search: Insufficient final balance for {symbol_to_trade} ({usdt_balance:.2f} USDT).")
-                            # نوقف البحث عن صفقات جديدة إذا لم يعد هناك رصيد
-                            break 
-                    except Exception as e:
-                        logger.error(f"Error during balance check for {symbol_to_trade}: {e}")
-        # --- [نهاية الحل] ---
+                await asyncio.sleep(2)
+        # --- End of fix ---
 
         scan_duration = time.time() - scan_start_time
         bot_data.last_scan_info = {"start_time": datetime.fromtimestamp(scan_start_time, EGYPT_TZ).strftime('%Y-%m-%d %H:%M:%S'), "duration_seconds": int(scan_duration), "checked_symbols": len(top_markets), "analysis_errors": len(analysis_errors)}
@@ -978,7 +907,7 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
                                    f"  - **إشارات جديدة:** {len(signals_found)}\n"
                                    f"  - **صفقات تم فتحها:** {trades_opened_count} صفقة\n"
                                    f"  - **مشكلات تحليل:** {len(analysis_errors)} عملة")
-        
+
 # =======================================================================================
 # --- [FINAL VERSION] Unified Binance WebSocket Manager (SPOT-CORRECTED) ---
 # =======================================================================================
@@ -1132,7 +1061,7 @@ class BinanceWebSocketManager:
                 logger.error(f"Guardian Ticker Error for {symbol}: {e}", exc_info=True)
 
 
-    async def _close_trade(self, trade, reason, close_price):
+   async def _close_trade(self, trade, reason, close_price):
         symbol, trade_id, quantity_in_db = trade['symbol'], trade['id'], trade['quantity']
         bot = self.application.bot
 
