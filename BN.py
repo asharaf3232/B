@@ -1134,7 +1134,23 @@ class BinanceWebSocketManager:
         try:
             # --- [الصندوق الأسود - مرحلة جمع الأدلة] ---
             base_currency = symbol.split('/')[0]
-            quantity_to_sell = float(bot_data.exchange.amount_to_precision(symbol, quantity_in_db))
+            
+            # --- [العلاج الجراحي لمشكلة LOT_SIZE] ---
+            import math
+            market = bot_data.exchange.market(symbol)
+            step_size_str = market.get('limits', {}).get('amount', {}).get('step')
+
+            if step_size_str is not None and float(step_size_str) > 0:
+                quantity_in_db_float = float(quantity_in_db)
+                step_size_float = float(step_size_str)
+                # المعادلة الصحيحة لتطبيق الـ step size (دائماً نقرب للأسفل عند البيع)
+                quantity_to_sell_float = math.floor(quantity_in_db_float / step_size_float) * step_size_float
+            else:
+                # إذا لم نجد step_size، نستخدم الطريقة القديمة كخطة بديلة
+                quantity_to_sell_float = float(bot_data.exchange.amount_to_precision(symbol, quantity_in_db))
+            
+            quantity_to_sell = float(quantity_to_sell_float)
+            # --- [نهاية العلاج] ---
 
             # 1. تسجيل حالة الرصيد والأوامر **قبل** أي إجراء
             logger.critical(f"--- BLACKBOX FOR TRADE #{trade_id} [{symbol}] ---")
@@ -1178,6 +1194,12 @@ class BinanceWebSocketManager:
 
             # 4. خطوة التنفيذ
             logger.info(f"[{symbol}] Step 3/3: Executing market sell order for {quantity_to_sell} {base_currency}.")
+            
+            # [فحص أخير] تأكد من أن الكمية لا تزال تفي بالحد الأدنى بعد التقريب
+            min_qty_str = market.get('limits', {}).get('amount', {}).get('min')
+            if min_qty_str and quantity_to_sell < float(min_qty_str):
+                raise Exception(f"Quantity {quantity_to_sell} is below minQty {min_qty_str} after applying step size. Cannot sell.")
+
             await bot_data.exchange.create_market_sell_order(symbol, quantity_to_sell)
             
             pnl = (close_price - trade['entry_price']) * quantity_to_sell
@@ -1237,8 +1259,32 @@ async def the_supervisor_job(context: ContextTypes.DEFAULT_TYPE):
     async with aiosqlite.connect(DB_FILE) as conn:
         conn.row_factory = aiosqlite.Row
         
-        # ... (منطق معالجة الصفقات الـ pending يبقى كما هو) ...
+        # --- [شبكة الأمان للصفقات العالقة في حالة Pending] ---
+        five_minutes_ago = (datetime.now(EGYPT_TZ) - timedelta(minutes=5)).isoformat()
+        stuck_pending_trades = await (await conn.execute("SELECT * FROM trades WHERE status = 'pending' AND timestamp < ?", (five_minutes_ago,))).fetchall()
 
+        if stuck_pending_trades:
+            logger.warning(f"🕵️ Supervisor: Found {len(stuck_pending_trades)} stuck pending trades. Verifying status...")
+            for trade_data in stuck_pending_trades:
+                trade = dict(trade_data)
+                try:
+                    logger.info(f"Supervisor: Checking status for pending order ID {trade['order_id']} for {trade['symbol']}.")
+                    order_status = await bot_data.exchange.fetch_order(trade['order_id'], trade['symbol'])
+                    
+                    if order_status['status'] == 'closed' or order_status.get('filled', 0) > 0:
+                        logger.warning(f"Supervisor: Order {trade['order_id']} was FILLED but missed by WebSocket. Activating trade manually.")
+                        await activate_trade(trade['order_id'], trade['symbol'])
+                    elif order_status['status'] == 'canceled' or order_status['status'] == 'expired':
+                        logger.error(f"Supervisor: Order {trade['order_id']} was CANCELED/EXPIRED. Removing pending trade.")
+                        await conn.execute("DELETE FROM trades WHERE id = ?", (trade['id'],))
+                    
+                    await asyncio.sleep(2) # فاصل بسيط بين كل تحقق
+                except ccxt.OrderNotFound:
+                    logger.error(f"Supervisor: Order {trade['order_id']} for {trade['symbol']} NOT FOUND on exchange. Deleting from DB.")
+                    await conn.execute("DELETE FROM trades WHERE id = ?", (trade['id'],))
+                except Exception as e:
+                    logger.error(f"🕵️ Supervisor: Error processing stuck pending trade #{trade['id']}: {e}")
+        
         # --- إدارة الصفقات في الحضانة (المنطق الصحيح) ---
         incubated_trades = await (await conn.execute("SELECT * FROM trades WHERE status = 'incubated'")).fetchall()
 
@@ -1262,7 +1308,8 @@ async def the_supervisor_job(context: ContextTypes.DEFAULT_TYPE):
                     logger.error(f"🕵️ Supervisor: Error processing incubated trade #{trade['id']}: {e}")
                 
                 await asyncio.sleep(2)
-            await conn.commit() # ننقل commit هنا لتشمل كل التغييرات
+        
+        await conn.commit()
     
     logger.info("🕵️ Supervisor: Audit and recovery checks complete.")
 # ... (بقية كود واجهة تليجرام يبقى كما هو بدون تغيير جوهري) ...
@@ -2035,7 +2082,6 @@ def main():
     
 if __name__ == '__main__':
     main()
-
 
 
 
