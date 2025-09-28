@@ -1114,122 +1114,74 @@ class BinanceWebSocketManager:
                 logger.error(f"Guardian Ticker Error for {symbol}: {e}", exc_info=True)
 
 
-    async def _close_trade(self, trade, reason, close_price):
-        symbol, trade_id, quantity_in_db = trade['symbol'], trade['id'], trade['quantity']
+        async def _close_trade(self, conn, trade, reason, close_price):
+        symbol, trade_id = trade['symbol'], trade['id']
         bot = self.application.bot
 
         try:
-            async with aiosqlite.connect(DB_FILE) as conn:
-                cursor = await conn.execute("UPDATE trades SET status = 'closing' WHERE id = ? AND status = 'active'", (trade_id,))
-                await conn.commit()
-                if cursor.rowcount == 0:
-                    logger.warning(f"Closure for trade #{trade_id} ignored; another process is already closing it or it's not active.")
-                    return
+            cursor = await conn.execute("UPDATE trades SET status = 'closing' WHERE id = ? AND status = 'active'", (trade_id,))
+            await conn.commit()
+            if cursor.rowcount == 0:
+                logger.warning(f"Closure for trade #{trade_id} ignored; another process is already closing it or it's not active.")
+                return
         except Exception as e:
-            logger.error(f"CRITICAL DB LOCK FAILED for trade #{trade_id}: {e}")
+            logger.error(f"CRITICAL DB ACTION FAILED for trade #{trade_id}: {e}")
             return
 
-        logger.info(f"Guardian: Attempting robust closure for trade #{trade_id} [{symbol}]. Reason: {reason}")
+        logger.info(f"Guardian: Attempting ULTIMATE robust closure for trade #{trade_id} [{symbol}]. Reason: {reason}")
         
         try:
-            # --- [الصندوق الأسود - مرحلة جمع الأدلة] ---
             base_currency = symbol.split('/')[0]
             
-            # --- [العلاج الجراحي لمشكلة LOT_SIZE] ---
+            # --- [العلاج النهائي] ---
+            # 1. لا نعتمد على قاعدة البيانات، بل نسأل المنصة عن الرصيد الفعلي الآن.
+            logger.info(f"[{symbol}] Fetching true current balance from exchange...")
+            balance = await bot_data.exchange.fetch_balance()
+            available_quantity = balance.get(base_currency, {}).get('free', 0.0)
+            
+            if available_quantity <= 0:
+                raise Exception(f"No available balance found for {base_currency} on the exchange.")
+
+            # 2. نطبق فلاتر التداول على الرصيد الفعلي الذي حصلنا عليه.
+            logger.info(f"[{symbol}] True balance is {available_quantity}. Formatting it for sale...")
             import math
             market = bot_data.exchange.market(symbol)
             step_size_str = market.get('limits', {}).get('amount', {}).get('step')
 
             if step_size_str is not None and float(step_size_str) > 0:
-                quantity_in_db_float = float(quantity_in_db)
                 step_size_float = float(step_size_str)
-                # المعادلة الصحيحة لتطبيق الـ step size (دائماً نقرب للأسفل عند البيع)
-                quantity_to_sell_float = math.floor(quantity_in_db_float / step_size_float) * step_size_float
+                quantity_to_sell_float = math.floor(available_quantity / step_size_float) * step_size_float
             else:
-                # إذا لم نجد step_size، نستخدم الطريقة القديمة كخطة بديلة
-                quantity_to_sell_float = float(bot_data.exchange.amount_to_precision(symbol, quantity_in_db))
+                quantity_to_sell_float = float(bot_data.exchange.amount_to_precision(symbol, available_quantity))
             
             quantity_to_sell = float(quantity_to_sell_float)
-            # --- [نهاية العلاج] ---
+            logger.info(f"[{symbol}] Final formatted quantity to sell: {quantity_to_sell}")
 
-            # 1. تسجيل حالة الرصيد والأوامر **قبل** أي إجراء
-            logger.critical(f"--- BLACKBOX FOR TRADE #{trade_id} [{symbol}] ---")
-            logger.critical("--- [PRE-ACTION STATE] ---")
-            try:
-                pre_balance = await bot_data.exchange.fetch_balance()
-                pre_open_orders = await bot_data.exchange.fetch_open_orders(symbol)
-                logger.critical(f"PRE-BALANCE for {base_currency}: {pre_balance.get(base_currency)}")
-                logger.critical(f"PRE-OPEN-ORDERS for {symbol}: {pre_open_orders}")
-            except Exception as e:
-                logger.error(f"Blackbox: Failed to fetch pre-action state: {e}")
-            
-            # 2. خطوة الإلغاء
-            logger.info(f"[{symbol}] Step 1/3: Cancelling any existing open orders...")
-            try:
-                await bot_data.exchange.cancel_all_orders(symbol)
-            except ccxt.OrderNotFound:
-                logger.warning(f"[{symbol}] Good error: OrderNotFound during cancellation.")
-            
-            # 3. التحقق الصبور وتسجيل الحالة **بعد** الإلغاء
-            logger.critical("--- [POST-CANCELLATION STATE] ---")
-            is_balance_free = False
-            for i in range(5): # سنحاول التحقق 5 مرات (لمدة 5 ثوانٍ)
-                await asyncio.sleep(1) # انتظر ثانية واحدة قبل كل تحقق
-                post_balance = await bot_data.exchange.fetch_balance()
-                post_open_orders = await bot_data.exchange.fetch_open_orders(symbol)
-                available_quantity = post_balance.get(base_currency, {}).get('free', 0.0)
-                
-                # تسجيل مفصل لكل محاولة تحقق
-                logger.critical(f"Verification attempt {i+1}/5:")
-                logger.critical(f"POST-BALANCE for {base_currency}: {post_balance.get(base_currency)}")
-                logger.critical(f"POST-OPEN-ORDERS for {symbol}: {post_open_orders}")
+            # 3. فحص أخير للتأكد أن الكمية النهائية تفي بالحد الأدنى للصفقة
+            min_notional_str = market.get('limits', {}).get('notional', {}).get('min')
+            if min_notional_str and (quantity_to_sell * close_price) < float(min_notional_str):
+                raise Exception(f"Final quantity value is below minimum notional value. Cannot sell. Value: {quantity_to_sell * close_price}, Min: {min_notional_str}")
 
-                if available_quantity >= quantity_to_sell * 0.98:
-                    is_balance_free = True
-                    logger.info(f"[{symbol}] Balance is confirmed to be free.")
-                    break
-
-            if not is_balance_free:
-                 raise Exception(f"Balance for {base_currency} did not become free after 5 seconds of checks.")
-
-            # 4. خطوة التنفيذ
-            logger.info(f"[{symbol}] Step 3/3: Executing market sell order for {quantity_to_sell} {base_currency}.")
-            
-            # [فحص أخير] تأكد من أن الكمية لا تزال تفي بالحد الأدنى بعد التقريب
-            min_qty_str = market.get('limits', {}).get('amount', {}).get('min')
-            if min_qty_str and quantity_to_sell < float(min_qty_str):
-                raise Exception(f"Quantity {quantity_to_sell} is below minQty {min_qty_str} after applying step size. Cannot sell.")
-
+            # 4. تنفيذ أمر البيع بالكمية الصحيحة 100%
             await bot_data.exchange.create_market_sell_order(symbol, quantity_to_sell)
             
             pnl = (close_price - trade['entry_price']) * quantity_to_sell
             pnl_percent = (close_price / trade['entry_price'] - 1) * 100 if trade['entry_price'] > 0 else 0
             emoji = "✅" if pnl >= 0 else "🛑"
             
-            async with aiosqlite.connect(DB_FILE) as conn:
-                await conn.execute("UPDATE trades SET status = ?, close_price = ?, pnl_usdt = ? WHERE id = ?", (reason, close_price, pnl, trade_id))
-                await conn.commit()
+            await conn.execute("UPDATE trades SET status = ?, close_price = ?, pnl_usdt = ? WHERE id = ?", (reason, close_price, pnl, trade_id))
+            await conn.commit()
                 
             await self.sync_subscriptions()
             await safe_send_message(bot, f"{emoji} **تم إغلاق الصفقة | #{trade_id} {symbol}**\n**السبب:** {reason}\n**الربح/الخسارة:** `${pnl:,.2f}` ({pnl_percent:+.2f}%)")
 
-            # استدعاء المحرك التطوري
-            try:
-                async with aiosqlite.connect(DB_FILE) as conn:
-                    conn.row_factory = aiosqlite.Row
-                    final_trade_details = await (await conn.execute("SELECT * FROM trades WHERE id = ?", (trade_id,))).fetchone()
-                    if final_trade_details:
-                        await smart_brain.add_trade_to_journal(dict(final_trade_details))
-            except Exception as e:
-                logger.error(f"Failed to pass trade #{trade_id} to smart brain for journaling: {e}")
-
         except Exception as e:
-            logger.critical(f"CRITICAL: Robust closure for #{trade_id} failed. MOVING TO INCUBATOR: {e}", exc_info=True)
-            async with aiosqlite.connect(DB_FILE) as conn:
-                await conn.execute("UPDATE trades SET status = 'incubated' WHERE id = ?", (trade_id,))
-                await conn.commit()
+            logger.critical(f"CRITICAL: ULTIMATE closure for #{trade_id} failed. MOVING TO INCUBATOR: {e}", exc_info=True)
+            await conn.execute("UPDATE trades SET status = 'incubated' WHERE id = ?", (trade_id,))
+            await conn.commit()
             await safe_send_message(bot, f"⚠️ **فشل الإغلاق | #{trade_id} {symbol}**\nسيتم نقل الصفقة إلى الحضانة للمراقبة ومحاولة التعافي.")
             await self.sync_subscriptions()
+
 
     async def sync_subscriptions(self):
         async with aiosqlite.connect(DB_FILE) as conn:
@@ -2090,3 +2042,4 @@ def main():
     
 if __name__ == '__main__':
     main()
+
