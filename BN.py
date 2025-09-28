@@ -1090,7 +1090,6 @@ class BinanceWebSocketManager:
         symbol, trade_id, quantity_in_db = trade['symbol'], trade['id'], trade['quantity']
         bot = self.application.bot
 
-        # الخطوة 0: تحديث فوري لقاعدة البيانات لمنع أي محاولة إغلاق مزدوجة
         try:
             async with aiosqlite.connect(DB_FILE) as conn:
                 cursor = await conn.execute("UPDATE trades SET status = 'closing' WHERE id = ? AND status = 'active'", (trade_id,))
@@ -1104,22 +1103,25 @@ class BinanceWebSocketManager:
 
         logger.info(f"Guardian: Attempting robust closure for trade #{trade_id} [{symbol}]. Reason: {reason}")
         
-        # --- [الحل النهائي] تطبيق مبدأ "إلغاء، تحقق، تنفيذ" ---
         try:
-            # الخطوة 1: إلغاء جميع الأوامر المفتوحة لهذه العملة أولاً (لتنظيف الساحة وتحرير أي رصيد محجوز)
+            # --- [الحل النهائي V6.9] جعل عملية الإلغاء متسامحة مع سباق المهام ---
             logger.info(f"[{symbol}] Step 1/3: Cancelling any existing open orders to free up assets...")
-            await bot_data.exchange.cancel_all_orders(symbol)
-            await asyncio.sleep(1) # انتظر ثانية للتأكد من أن الرصيد قد تحرر في المنصة
+            try:
+                await bot_data.exchange.cancel_all_orders(symbol)
+                logger.info(f"[{symbol}] Successfully sent cancel command.")
+            except ccxt.OrderNotFound as e:
+                # هذا الخطأ إيجابي، ويعني أن الأوامر تم إغلاقها أو تنفيذها بالفعل. نتجاهله ونكمل.
+                logger.warning(f"[{symbol}] Good error: OrderNotFound during cancellation means orders were likely already filled/closed. Continuing...")
+            await asyncio.sleep(1)
+            # ----------------------------------------------------------------
 
-            # الخطوة 2: التحقق من الرصيد الفعلي للعملة بعد عملية التنظيف
             logger.info(f"[{symbol}] Step 2/3: Verifying actual asset balance...")
             balance = await bot_data.exchange.fetch_balance()
             base_currency = symbol.split('/')[0]
             available_quantity = balance.get(base_currency, {}).get('free', 0.0)
             quantity_to_sell = float(bot_data.exchange.amount_to_precision(symbol, quantity_in_db))
 
-            # التحقق من وجود الكمية المطلوبة فعليًا (حماية إضافية ضد أي خطأ)
-            if available_quantity < quantity_to_sell * 0.98: # نتسامح مع فرق بسيط جداً
+            if available_quantity < quantity_to_sell * 0.98:
                 error_msg = f"CRITICAL: Ghost trade detected for #{trade_id}. DB wants to sell {quantity_to_sell}, but wallet only has {available_quantity} after cleanup."
                 logger.error(error_msg)
                 async with aiosqlite.connect(DB_FILE) as conn:
@@ -1129,11 +1131,9 @@ class BinanceWebSocketManager:
                 await safe_send_message(bot, f"🚨 تم اكتشاف صفقة شبحية #{trade_id} | {symbol}\nتم إلغاؤها.")
                 return
 
-            # الخطوة 3: الآن فقط، وبعد التأكد من أن الساحة نظيفة والرصيد متاح، قم بتنفيذ أمر البيع
             logger.info(f"[{symbol}] Step 3/3: Executing market sell order for {quantity_to_sell} {base_currency}.")
             await bot_data.exchange.create_market_sell_order(symbol, quantity_to_sell)
             
-            # إذا وصلنا إلى هنا، فالبيع قد تم بنجاح
             pnl = (close_price - trade['entry_price']) * quantity_to_sell
             pnl_percent = (close_price / trade['entry_price'] - 1) * 100 if trade['entry_price'] > 0 else 0
             emoji = "✅" if pnl >= 0 else "🛑"
@@ -1146,7 +1146,6 @@ class BinanceWebSocketManager:
             await safe_send_message(bot, f"{emoji} **تم إغلاق الصفقة | #{trade_id} {symbol}**\n**السبب:** {reason}\n**الربح/الخسارة:** `${pnl:,.2f}` ({pnl_percent:+.2f}%)")
 
         except Exception as e:
-            # إذا فشلت هذه العملية المحصنة بالكامل، فالخطأ جسيم ويستدعي التدخل الفوري
             logger.critical(f"CRITICAL: The robust closure process for trade #{trade_id} failed entirely: {e}", exc_info=True)
             async with aiosqlite.connect(DB_FILE) as conn:
                 await conn.execute("UPDATE trades SET status = 'closure_failed' WHERE id = ?", (trade_id,))
@@ -1878,8 +1877,11 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
 # ==============================================================================
 async def post_init(application: Application):
     logger.info("Performing post-initialization setup for Intelligent Engine Bot...")
-    if not all([TELEGRAM_BOT_TOKEN, BINANCE_API_KEY, BINANCE_API_SECRET]):
-        logger.critical("FATAL: Missing environment variables."); return
+    if not all([TELEGRAM_BOT_TOKEN, BINANCE_API_KEY, BINANCE_API_SECRET, TELEGRAM_CHAT_ID]):
+        logger.critical("FATAL: Missing one or more required environment variables."); return
+
+    # إضافة chat_id إلى بيانات البوت لاستخدامه في الوحدات الأخرى
+    application.bot_data['TELEGRAM_CHAT_ID'] = TELEGRAM_CHAT_ID
 
     if NLTK_AVAILABLE:
         try: nltk.data.find('sentiment/vader_lexicon.zip')
@@ -1901,13 +1903,10 @@ async def post_init(application: Application):
     except Exception as e:
         logger.critical(f"🔥 FATAL: Could not connect to Binance: {e}", exc_info=True); return
 
-    # --- [التعديل الأول] تفعيل الرجل الحكيم ---
-    # نستورد الوحدة هنا لتجنب الاستيراد الدائري إذا تطور المشروع
-    from wise_man import WiseMan
+    # --- تفعيل الرجل الحكيم ---
     global wise_man
-    # نقوم بتمرير منصة التداول وتطبيق تليجرام له
     wise_man = WiseMan(exchange=bot_data.exchange, application=application)
-    # ------------------------------------
+    # --------------------------
 
     load_settings()
     await init_database()
@@ -1929,16 +1928,19 @@ async def post_init(application: Application):
     jq.run_repeating(update_strategy_performance, interval=STRATEGY_ANALYSIS_INTERVAL_SECONDS, first=60, name="update_strategy_performance")
     jq.run_repeating(propose_strategy_changes, interval=STRATEGY_ANALYSIS_INTERVAL_SECONDS, first=120, name="propose_strategy_changes")
 
-    # --- [التعديل الثاني] جدولة مهمة الرجل الحكيم لتعمل كل 30 دقيقة ---
-    jq.run_repeating(wise_man.review_open_trades, interval=1800, first=45, name="wise_man_review")
-    # -----------------------------------------------------------
+    # --- جدولة مهام الرجل الحكيم ---
+    # مراجعة الصفقات المفتوحة كل 30 دقيقة
+    jq.run_repeating(wise_man.review_open_trades, interval=1800, first=45, name="wise_man_trade_review")
+    # مراجعة مخاطر المحفظة كل ساعة
+    jq.run_repeating(wise_man.review_portfolio_risk, interval=3600, first=90, name="wise_man_portfolio_review")
+    # ---------------------------------
 
-    logger.info(f"All jobs scheduled. Wise Man review is now active.")
+    logger.info(f"All jobs scheduled. Wise Man is now fully active.")
     try: 
-        await application.bot.send_message(TELEGRAM_CHAT_ID, "*🤖 بوت باينانس V6.7 (الرجل الحكيم مفعل) - بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
+        await application.bot.send_message(TELEGRAM_CHAT_ID, "*🤖 بوت باينانس V6.8 (الرجل الحكيم مفعل بالكامل) - بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
     except Forbidden: 
         logger.critical(f"FATAL: Bot not authorized for chat ID {TELEGRAM_CHAT_ID}."); return
-    logger.info("--- Binance Intelligent Engine Bot V6.7 (Wise Man Activated) is now fully operational ---")
+    logger.info("--- Binance Intelligent Engine Bot V6.8 (Wise Man Fully Activated) is now fully operational ---")
 
 async def post_shutdown(application: Application):
     if bot_data.exchange:
