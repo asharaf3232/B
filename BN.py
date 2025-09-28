@@ -61,6 +61,8 @@ from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKe
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters, CallbackQueryHandler
 from telegram.constants import ParseMode
 from telegram.error import BadRequest, TimedOut, Forbidden
+# لا تضع هذا السطر داخل الدالة، بل في الأعلى
+from wise_man import WiseMan
 
 # --- إعدادات أساسية ---
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -168,6 +170,8 @@ class BotState:
         self.pending_strategy_proposal = {}
 
 bot_data = BotState()
+# لا تضع هذا السطر داخل الدالة، بل في الأعلى
+wise_man = None
 scan_lock = asyncio.Lock()
 trade_management_lock = asyncio.Lock()
 
@@ -1897,6 +1901,14 @@ async def post_init(application: Application):
     except Exception as e:
         logger.critical(f"🔥 FATAL: Could not connect to Binance: {e}", exc_info=True); return
 
+    # --- [التعديل الأول] تفعيل الرجل الحكيم ---
+    # نستورد الوحدة هنا لتجنب الاستيراد الدائري إذا تطور المشروع
+    from wise_man import WiseMan
+    global wise_man
+    # نقوم بتمرير منصة التداول وتطبيق تليجرام له
+    wise_man = WiseMan(exchange=bot_data.exchange, application=application)
+    # ------------------------------------
+
     load_settings()
     await init_database()
 
@@ -1910,16 +1922,23 @@ async def post_init(application: Application):
     logger.info("Waiting 10s for WebSocket connections..."); await asyncio.sleep(10)
 
     jq = application.job_queue
+    # المهام الأصلية
     jq.run_repeating(perform_scan, interval=SCAN_INTERVAL_SECONDS, first=10, name="perform_scan")
     jq.run_repeating(the_supervisor_job, interval=SUPERVISOR_INTERVAL_SECONDS, first=30, name="the_supervisor_job")
     jq.run_daily(send_daily_report, time=dt_time(hour=23, minute=55, tzinfo=EGYPT_TZ), name='daily_report')
     jq.run_repeating(update_strategy_performance, interval=STRATEGY_ANALYSIS_INTERVAL_SECONDS, first=60, name="update_strategy_performance")
     jq.run_repeating(propose_strategy_changes, interval=STRATEGY_ANALYSIS_INTERVAL_SECONDS, first=120, name="propose_strategy_changes")
 
-    logger.info(f"All jobs scheduled. Supervisor running every {SUPERVISOR_INTERVAL_SECONDS}s.")
-    try: await application.bot.send_message(TELEGRAM_CHAT_ID, "*🤖 بوت باينانس V6.6 (المحرك المدقق) - بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
-    except Forbidden: logger.critical(f"FATAL: Bot not authorized for chat ID {TELEGRAM_CHAT_ID}."); return
-    logger.info("--- Binance Intelligent Engine Bot V6.6 is now fully operational ---")
+    # --- [التعديل الثاني] جدولة مهمة الرجل الحكيم لتعمل كل 30 دقيقة ---
+    jq.run_repeating(wise_man.review_open_trades, interval=1800, first=45, name="wise_man_review")
+    # -----------------------------------------------------------
+
+    logger.info(f"All jobs scheduled. Wise Man review is now active.")
+    try: 
+        await application.bot.send_message(TELEGRAM_CHAT_ID, "*🤖 بوت باينانس V6.7 (الرجل الحكيم مفعل) - بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
+    except Forbidden: 
+        logger.critical(f"FATAL: Bot not authorized for chat ID {TELEGRAM_CHAT_ID}."); return
+    logger.info("--- Binance Intelligent Engine Bot V6.7 (Wise Man Activated) is now fully operational ---")
 
 async def post_shutdown(application: Application):
     if bot_data.exchange:
