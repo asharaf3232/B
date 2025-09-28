@@ -1115,9 +1115,6 @@ class BinanceWebSocketManager:
 
 
     async def _close_trade(self, trade, reason, close_price):
-        # --- [الاختبار النهائي] إضافة علامة مميزة لتأكيد تشغيل الكود الصحيح ---
-        logger.critical("--- EXECUTING V6.9 ROBUST CLOSURE PROTOCOL ---")
-        
         symbol, trade_id, quantity_in_db = trade['symbol'], trade['id'], trade['quantity']
         bot = self.application.bot
 
@@ -1135,32 +1132,51 @@ class BinanceWebSocketManager:
         logger.info(f"Guardian: Attempting robust closure for trade #{trade_id} [{symbol}]. Reason: {reason}")
         
         try:
-            # الخطوة 1: إلغاء الأوامر المفتوحة مع تجاهل خطأ "OrderNotFound"
+            # --- [الصندوق الأسود - مرحلة جمع الأدلة] ---
+            base_currency = symbol.split('/')[0]
+            quantity_to_sell = float(bot_data.exchange.amount_to_precision(symbol, quantity_in_db))
+
+            # 1. تسجيل حالة الرصيد والأوامر **قبل** أي إجراء
+            logger.critical(f"--- BLACKBOX FOR TRADE #{trade_id} [{symbol}] ---")
+            logger.critical("--- [PRE-ACTION STATE] ---")
+            try:
+                pre_balance = await bot_data.exchange.fetch_balance()
+                pre_open_orders = await bot_data.exchange.fetch_open_orders(symbol)
+                logger.critical(f"PRE-BALANCE for {base_currency}: {pre_balance.get(base_currency)}")
+                logger.critical(f"PRE-OPEN-ORDERS for {symbol}: {pre_open_orders}")
+            except Exception as e:
+                logger.error(f"Blackbox: Failed to fetch pre-action state: {e}")
+            
+            # 2. خطوة الإلغاء
             logger.info(f"[{symbol}] Step 1/3: Cancelling any existing open orders...")
             try:
                 await bot_data.exchange.cancel_all_orders(symbol)
-                logger.info(f"[{symbol}] Successfully sent cancel command.")
             except ccxt.OrderNotFound:
-                logger.warning(f"[{symbol}] Good error: OrderNotFound during cancellation means orders were likely already handled. Continuing...")
-            await asyncio.sleep(1)
+                logger.warning(f"[{symbol}] Good error: OrderNotFound during cancellation.")
+            
+            # 3. التحقق الصبور وتسجيل الحالة **بعد** الإلغاء
+            logger.critical("--- [POST-CANCELLATION STATE] ---")
+            is_balance_free = False
+            for i in range(5): # سنحاول التحقق 5 مرات (لمدة 5 ثوانٍ)
+                await asyncio.sleep(1) # انتظر ثانية واحدة قبل كل تحقق
+                post_balance = await bot_data.exchange.fetch_balance()
+                post_open_orders = await bot_data.exchange.fetch_open_orders(symbol)
+                available_quantity = post_balance.get(base_currency, {}).get('free', 0.0)
+                
+                # تسجيل مفصل لكل محاولة تحقق
+                logger.critical(f"Verification attempt {i+1}/5:")
+                logger.critical(f"POST-BALANCE for {base_currency}: {post_balance.get(base_currency)}")
+                logger.critical(f"POST-OPEN-ORDERS for {symbol}: {post_open_orders}")
 
-            # الخطوة 2: التحقق من الرصيد الفعلي بعد التنظيف
-            logger.info(f"[{symbol}] Step 2/3: Verifying actual asset balance...")
-            balance = await bot_data.exchange.fetch_balance()
-            base_currency = symbol.split('/')[0]
-            available_quantity = balance.get(base_currency, {}).get('free', 0.0)
-            quantity_to_sell = float(bot_data.exchange.amount_to_precision(symbol, quantity_in_db))
+                if available_quantity >= quantity_to_sell * 0.98:
+                    is_balance_free = True
+                    logger.info(f"[{symbol}] Balance is confirmed to be free.")
+                    break
 
-            if available_quantity < quantity_to_sell * 0.98:
-                error_msg = f"CRITICAL: Ghost trade detected for #{trade_id}. DB wants to sell {quantity_to_sell}, but wallet only has {available_quantity}."
-                logger.error(error_msg)
-                async with aiosqlite.connect(DB_FILE) as conn:
-                    await conn.execute("UPDATE trades SET status = ?, pnl_usdt = ? WHERE id = ?", (f'failed (ghost)', 0.0, trade_id))
-                    await conn.commit()
-                await self.sync_subscriptions()
-                return
+            if not is_balance_free:
+                 raise Exception(f"Balance for {base_currency} did not become free after 5 seconds of checks.")
 
-            # الخطوة 3: تنفيذ أمر البيع
+            # 4. خطوة التنفيذ
             logger.info(f"[{symbol}] Step 3/3: Executing market sell order for {quantity_to_sell} {base_currency}.")
             await bot_data.exchange.create_market_sell_order(symbol, quantity_to_sell)
             
@@ -1175,7 +1191,7 @@ class BinanceWebSocketManager:
             await self.sync_subscriptions()
             await safe_send_message(bot, f"{emoji} **تم إغلاق الصفقة | #{trade_id} {symbol}**\n**السبب:** {reason}\n**الربح/الخسارة:** `${pnl:,.2f}` ({pnl_percent:+.2f}%)")
 
-            # [تفعيل المحرك التطوري]
+            # استدعاء المحرك التطوري
             try:
                 async with aiosqlite.connect(DB_FILE) as conn:
                     conn.row_factory = aiosqlite.Row
@@ -1186,7 +1202,6 @@ class BinanceWebSocketManager:
                 logger.error(f"Failed to pass trade #{trade_id} to smart brain for journaling: {e}")
 
         except Exception as e:
-            # إذا فشلت العملية المحصنة، يتم نقل الصفقة إلى الحضانة
             logger.critical(f"CRITICAL: Robust closure for #{trade_id} failed. MOVING TO INCUBATOR: {e}", exc_info=True)
             async with aiosqlite.connect(DB_FILE) as conn:
                 await conn.execute("UPDATE trades SET status = 'incubated' WHERE id = ?", (trade_id,))
@@ -2042,6 +2057,7 @@ def main():
     
 if __name__ == '__main__':
     main()
+
 
 
 
