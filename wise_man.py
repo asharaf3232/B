@@ -106,7 +106,13 @@ class WiseMan:
         logger.info("🧠 Wise Man: Starting portfolio risk review...")
         try:
             balance = await self.exchange.fetch_balance()
-            assets = {asset: data['total'] for asset, data in balance.items() if data.get('total', 0) > 0.00001 and asset != 'USDT'}
+            
+            # [الإصلاح] التأكد من أننا نتعامل فقط مع القواميس وليس الأرقام أو أي شيء آخر
+            assets = {
+                asset: data['total'] 
+                for asset, data in balance.items() 
+                if isinstance(data, dict) and data.get('total', 0) > 0.00001 and asset != 'USDT'
+            }
             
             if not assets:
                 logger.info("🧠 Wise Man: Portfolio is empty (only USDT). No risks to analyze.")
@@ -117,18 +123,23 @@ class WiseMan:
 
             tickers = await self.exchange.fetch_tickers(asset_list)
             
-            total_portfolio_value = balance.get('USDT', {}).get('total', 0.0)
+            usdt_total = balance.get('USDT', {}).get('total', 0.0)
+            if not isinstance(usdt_total, float): usdt_total = 0.0 # حماية إضافية
+            total_portfolio_value = usdt_total
+
             asset_values = {}
             for asset, amount in assets.items():
                 symbol = f"{asset}/USDT"
-                if symbol in tickers:
+                if symbol in tickers and tickers[symbol] and tickers[symbol]['last'] is not None:
                     value_usdt = amount * tickers[symbol]['last']
-                    if value_usdt > 1.0: # تجاهل الأرصدة الصغيرة جدًا
+                    if value_usdt > 1.0:
                         asset_values[asset] = value_usdt
                         total_portfolio_value += value_usdt
 
             if total_portfolio_value < 1.0: return
 
+            # ... باقي منطق التحليل كما هو ...
+            # (سيتم نسخه من الكود أدناه لضمان الكمال)
             for asset, value in asset_values.items():
                 concentration_pct = (value / total_portfolio_value) * 100
                 if concentration_pct > PORTFOLIO_RISK_RULES['max_asset_concentration_pct']:
