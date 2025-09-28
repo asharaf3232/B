@@ -1061,72 +1061,69 @@ class BinanceWebSocketManager:
                 logger.error(f"Guardian Ticker Error for {symbol}: {e}", exc_info=True)
 
 
-async def _close_trade(self, trade, reason, close_price):
-    symbol, trade_id, quantity_in_db = trade['symbol'], trade['id'], trade['quantity']
-    bot = self.application.bot
-
-    # الخطوة 0: تحديث فوري لقاعدة البيانات لمنع أي محاولة إغلاق مزدوجة
-    try:
-        async with aiosqlite.connect(DB_FILE) as conn:
-            cursor = await conn.execute("UPDATE trades SET status = 'closing' WHERE id = ? AND status = 'active'", (trade_id,))
-            await conn.commit()
-            if cursor.rowcount == 0:
-                logger.warning(f"Closure for trade #{trade_id} ignored; another process is already closing it or it's not active.")
-                return
-    except Exception as e:
-        logger.error(f"CRITICAL DB LOCK FAILED for trade #{trade_id}: {e}")
-        return
-
-    logger.info(f"Guardian: Attempting robust closure for trade #{trade_id} [{symbol}]. Reason: {reason}")
-    
-    # --- [الحل النهائي] تطبيق مبدأ "إلغاء، تحقق، تنفيذ" ---
-    try:
-        # الخطوة 1: إلغاء جميع الأوامر المفتوحة لهذه العملة أولاً (لتنظيف الساحة وتحرير أي رصيد محجوز)
-        logger.info(f"[{symbol}] Step 1/3: Cancelling any existing open orders to free up assets...")
-        await bot_data.exchange.cancel_all_orders(symbol)
-        await asyncio.sleep(1) # انتظر ثانية للتأكد من أن الرصيد قد تحرر في المنصة
-
-        # الخطوة 2: التحقق من الرصيد الفعلي للعملة بعد عملية التنظيف
-        logger.info(f"[{symbol}] Step 2/3: Verifying actual asset balance...")
-        balance = await bot_data.exchange.fetch_balance()
-        base_currency = symbol.split('/')[0]
-        available_quantity = balance.get(base_currency, {}).get('free', 0.0)
-        quantity_to_sell = float(bot_data.exchange.amount_to_precision(symbol, quantity_in_db))
-
-        # التحقق من وجود الكمية المطلوبة فعليًا (حماية إضافية ضد أي خطأ)
-        if available_quantity < quantity_to_sell * 0.98: # نتسامح مع فرق بسيط جداً
-            error_msg = f"CRITICAL: Ghost trade detected for #{trade_id}. DB wants to sell {quantity_to_sell}, but wallet only has {available_quantity} after cleanup."
-            logger.error(error_msg)
+    async def _close_trade(self, trade, reason, close_price):
+        symbol, trade_id = trade['symbol'], trade['id']
+        bot = self.application.bot
+        
+        # --- [الإصلاح الحاسم] منع سباق المهام (Race Condition) ---
+        # 1. تحديث الحالة فوراً لمنع أي محاولة إغلاق أخرى لنفس الصفقة
+        try:
             async with aiosqlite.connect(DB_FILE) as conn:
-                await conn.execute("UPDATE trades SET status = ?, pnl_usdt = ? WHERE id = ?", (f'failed (ghost)', 0.0, trade_id))
+                cursor = await conn.execute("UPDATE trades SET status = 'closing' WHERE id = ? AND status = 'active'", (trade_id,))
                 await conn.commit()
-            await self.sync_subscriptions()
-            await safe_send_message(bot, f"🚨 تم اكتشاف صفقة شبحية #{trade_id} | {symbol}\nتم إلغاؤها.")
+                # إذا لم يتم تحديث أي صف (لأنها لم تكن نشطة)، فهذا يعني أن عملية إغلاق أخرى قد بدأت بالفعل
+                if cursor.rowcount == 0:
+                    logger.warning(f"Closure for trade #{trade_id} ignored; another process is already closing it.")
+                    return
+        except Exception as e:
+            logger.error(f"CRITICAL DB LOCK FAILED for trade #{trade_id}: {e}")
             return
+        # --- [نهاية الإصلاح] ---
 
-        # الخطوة 3: الآن فقط، وبعد التأكد من أن الساحة نظيفة والرصيد متاح، قم بتنفيذ أمر البيع
-        logger.info(f"[{symbol}] Step 3/3: Executing market sell order for {quantity_to_sell} {base_currency}.")
-        await bot_data.exchange.create_market_sell_order(symbol, quantity_to_sell)
+        logger.info(f"Guardian: Attempting to close trade #{trade_id} for {symbol}. Reason: {reason}")
+        quantity_to_sell = float(bot_data.exchange.amount_to_precision(symbol, trade['quantity']))
         
-        # إذا وصلنا إلى هنا، فالبيع قد تم بنجاح
-        pnl = (close_price - trade['entry_price']) * quantity_to_sell
-        pnl_percent = (close_price / trade['entry_price'] - 1) * 100 if trade['entry_price'] > 0 else 0
-        emoji = "✅" if pnl >= 0 else "🛑"
-        
-        async with aiosqlite.connect(DB_FILE) as conn:
-            await conn.execute("UPDATE trades SET status = ?, close_price = ?, pnl_usdt = ? WHERE id = ?", (reason, close_price, pnl, trade_id))
-            await conn.commit()
-            
-        await self.sync_subscriptions()
-        await safe_send_message(bot, f"{emoji} **تم إغلاق الصفقة | #{trade_id} {symbol}**\n**السبب:** {reason}\n**الربح/الخسارة:** `${pnl:,.2f}` ({pnl_percent:+.2f}%)")
+        # --- [إصلاح الخطأ الثانوي] إزالة await من دالة market المتزامنة ---
+        try:
+            # الدالة market لا تحتاج await لأنها تقرأ من الذاكرة
+            market = bot_data.exchange.market(symbol)
+            min_notional = float(market.get('limits', {}).get('notional', {}).get('min', 0.0))
+            if min_notional > 0 and (quantity_to_sell * close_price) < min_notional:
+                logger.critical(f"Closure for trade #{trade_id} aborted: Notional value is below minimum. Manual review needed.")
+                async with aiosqlite.connect(DB_FILE) as conn:
+                    await conn.execute("UPDATE trades SET status = ? WHERE id = ?", ('closure_failed_min_notional', trade_id))
+                    await conn.commit()
+                await safe_send_message(bot, f"🚨 فشل إغلاق #{trade_id} | {symbol}\nالسبب: القيمة أقل من الحد الأدنى للمنصة.")
+                await self.sync_subscriptions()
+                return
+        except Exception as e:
+            logger.error(f"Failed to check market rules for trade #{trade_id}: {e}")
+        # --- [نهاية الإصلاح] ---
 
-    except Exception as e:
-        # إذا فشلت هذه العملية المحصنة بالكامل، فالخطأ جسيم ويستدعي التدخل الفوري
-        logger.critical(f"CRITICAL: The robust closure process for trade #{trade_id} failed entirely: {e}", exc_info=True)
+        for i in range(bot_data.settings.get('close_retries', 3)):
+            try:
+                await bot_data.exchange.create_market_sell_order(symbol, quantity_to_sell)
+                pnl = (close_price - trade['entry_price']) * quantity_to_sell
+                pnl_percent = (close_price / trade['entry_price'] - 1) * 100 if trade['entry_price'] > 0 else 0
+                emoji = "✅" if pnl >= 0 else "🛑"
+                async with aiosqlite.connect(DB_FILE) as conn:
+                    await conn.execute("UPDATE trades SET status = ?, close_price = ?, pnl_usdt = ? WHERE id = ?", (reason, close_price, pnl, trade_id))
+                    await conn.commit()
+                await self.sync_subscriptions()
+                await safe_send_message(bot, f"{emoji} **تم إغلاق الصفقة | #{trade_id} {symbol}**\n**السبب:** {reason}\n**الربح/الخسارة:** `${pnl:,.2f}` ({pnl_percent:+.2f}%)")
+                return
+            except ccxt.InvalidOrder as e:
+                logger.critical(f"CRITICAL: Trade #{trade_id} closure failed permanently due to InvalidOrder: {e}. Manual intervention required.")
+                break 
+            except Exception as e:
+                logger.warning(f"Failed to close trade #{trade_id}. Retrying... ({i + 1}/{bot_data.settings.get('close_retries', 3)})", exc_info=True)
+                await asyncio.sleep(5)
+
+        logger.critical(f"CRITICAL: Failed to close trade #{trade_id} after retries.")
         async with aiosqlite.connect(DB_FILE) as conn:
             await conn.execute("UPDATE trades SET status = 'closure_failed' WHERE id = ?", (trade_id,))
             await conn.commit()
-        await safe_send_message(bot, f"🚨 **فشل حرج ونهائي** 🚨\nفشل إغلاق الصفقة `#{trade_id}` حتى بعد عملية التنظيف. الرجاء مراجعة المنصة فوراً.")
+        await safe_send_message(bot, f"🚨 **فشل حرج** 🚨\nفشل إغلاق الصفقة `#{trade_id}`. الرجاء مراجعة المنصة يدوياً.")
         await self.sync_subscriptions()
 
 
