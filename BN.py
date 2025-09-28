@@ -1087,6 +1087,9 @@ class BinanceWebSocketManager:
 
 
     async def _close_trade(self, trade, reason, close_price):
+        # --- [الاختبار النهائي] إضافة علامة مميزة لتأكيد تشغيل الكود الصحيح ---
+        logger.critical("--- EXECUTING V6.9 ROBUST CLOSURE PROTOCOL ---")
+        
         symbol, trade_id, quantity_in_db = trade['symbol'], trade['id'], trade['quantity']
         bot = self.application.bot
 
@@ -1133,7 +1136,6 @@ class BinanceWebSocketManager:
             logger.info(f"[{symbol}] Step 3/3: Executing market sell order for {quantity_to_sell} {base_currency}.")
             await bot_data.exchange.create_market_sell_order(symbol, quantity_to_sell)
             
-            # إذا نجح البيع، يتم حساب الربح وتحديث قاعدة البيانات
             pnl = (close_price - trade['entry_price']) * quantity_to_sell
             pnl_percent = (close_price / trade['entry_price'] - 1) * 100 if trade['entry_price'] > 0 else 0
             emoji = "✅" if pnl >= 0 else "🛑"
@@ -1145,7 +1147,7 @@ class BinanceWebSocketManager:
             await self.sync_subscriptions()
             await safe_send_message(bot, f"{emoji} **تم إغلاق الصفقة | #{trade_id} {symbol}**\n**السبب:** {reason}\n**الربح/الخسارة:** `${pnl:,.2f}` ({pnl_percent:+.2f}%)")
 
-            # --- [تفعيل المحرك التطوري] ---
+            # [تفعيل المحرك التطوري]
             try:
                 async with aiosqlite.connect(DB_FILE) as conn:
                     conn.row_factory = aiosqlite.Row
@@ -1154,7 +1156,6 @@ class BinanceWebSocketManager:
                         await smart_brain.add_trade_to_journal(dict(final_trade_details))
             except Exception as e:
                 logger.error(f"Failed to pass trade #{trade_id} to smart brain for journaling: {e}")
-            # --------------------------------
 
         except Exception as e:
             # إذا فشلت العملية المحصنة، يتم نقل الصفقة إلى الحضانة
