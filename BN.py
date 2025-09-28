@@ -39,7 +39,8 @@ import ccxt.async_support as ccxt
 import feedparser
 import websockets
 import websockets.exceptions
-
+import tensorflow as tf
+import numpy as np
 # --- [ترقية] مكتبات جديدة للعقل المطور ---
 try:
     import nltk
@@ -175,6 +176,7 @@ wise_man = None
 scan_lock = asyncio.Lock()
 trade_management_lock = asyncio.Lock()
 smart_brain = None
+trained_brain = None
 # --- وظائف مساعدة وقاعدة البيانات ---
 def load_settings():
     try:
@@ -1951,7 +1953,6 @@ async def post_init(application: Application):
     if not all([TELEGRAM_BOT_TOKEN, BINANCE_API_KEY, BINANCE_API_SECRET, TELEGRAM_CHAT_ID]):
         logger.critical("FATAL: Missing one or more required environment variables."); return
 
-    # إضافة chat_id إلى بيانات البوت لاستخدامه في الوحدات الأخرى
     application.bot_data['TELEGRAM_CHAT_ID'] = TELEGRAM_CHAT_ID
 
     if NLTK_AVAILABLE:
@@ -1974,14 +1975,22 @@ async def post_init(application: Application):
     except Exception as e:
         logger.critical(f"🔥 FATAL: Could not connect to Binance: {e}", exc_info=True); return
 
-    # --- تفعيل الرجل الحكيم ---
-    global wise_man
+    # --- تفعيل الوحدات الذكية ---
+    global wise_man, smart_brain, trained_brain
+    
+    # 1. تفعيل الرجل الحكيم (العقل التكتيكي)
     wise_man = WiseMan(exchange=bot_data.exchange, application=application)
-    # --------------------------
-
-    # --- [تفعيل] تفعيل المحرك التطوري (العقل الذكي) ---  # <--- الإضافة الجديدة هنا
-    global smart_brain
+    
+    # 2. تفعيل المحرك التطوري (الذاكرة والتعلم من الماضي)
     smart_brain = EvolutionaryEngine(exchange=bot_data.exchange, application=application)
+
+    # 3. تحميل العقل المعزز (الدماغ المدرب)
+    try:
+        trained_brain = tf.keras.models.load_model('crypto_trader_brain.h5')
+        logger.info("🤖 Reinforced Mind (trained_brain.h5) has been successfully loaded.")
+    except Exception as e:
+        logger.error(f"Failed to load trained brain model: {e}")
+        trained_brain = None
     # ----------------------------------------------------
 
     load_settings()
@@ -1996,28 +2005,33 @@ async def post_init(application: Application):
 
     logger.info("Waiting 10s for WebSocket connections..."); await asyncio.sleep(10)
 
+    # --- جدولة جميع المهام ---
     jq = application.job_queue
-    # المهام الأصلية
     jq.run_repeating(perform_scan, interval=SCAN_INTERVAL_SECONDS, first=10, name="perform_scan")
     jq.run_repeating(the_supervisor_job, interval=SUPERVISOR_INTERVAL_SECONDS, first=30, name="the_supervisor_job")
     jq.run_daily(send_daily_report, time=dt_time(hour=23, minute=55, tzinfo=EGYPT_TZ), name='daily_report')
+    
+    # مهام الذكاء التكيفي
     jq.run_repeating(update_strategy_performance, interval=STRATEGY_ANALYSIS_INTERVAL_SECONDS, first=60, name="update_strategy_performance")
     jq.run_repeating(propose_strategy_changes, interval=STRATEGY_ANALYSIS_INTERVAL_SECONDS, first=120, name="propose_strategy_changes")
-
-    # --- جدولة مهام الرجل الحكيم ---
-    # مراجعة الصفقات المفتوحة كل 30 دقيقة
+    
+    # مهام الرجل الحكيم
     jq.run_repeating(wise_man.review_open_trades, interval=1800, first=45, name="wise_man_trade_review")
-    # مراجعة مخاطر المحفظة كل ساعة
     jq.run_repeating(wise_man.review_portfolio_risk, interval=3600, first=90, name="wise_man_portfolio_review")
-    # ---------------------------------
+    
+    # مهمة المحرك التطوري
+    jq.run_daily(smart_brain.run_pattern_discovery, time=dt_time(hour=5, minute=0, tzinfo=EGYPT_TZ), name='pattern_discovery')
 
-    logger.info(f"All jobs scheduled. Wise Man is now fully active.")
+    logger.info(f"All jobs scheduled. All intelligent modules are active.")
     try: 
-        await application.bot.send_message(TELEGRAM_CHAT_ID, "*🤖 بوت باينانس V6.8 (الرجل الحكيم مفعل بالكامل) - بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
+        startup_message = "*🤖 بوت باينانس V7.0 (العقل المعزز) - بدأ العمل...*"
+        if trained_brain is None:
+            startup_message = "*🤖 بوت باينانس V6.9 (الرجل الحكيم) - بدأ العمل... (تحذير: لم يتم تحميل العقل المعزز)*"
+        await application.bot.send_message(TELEGRAM_CHAT_ID, startup_message, parse_mode=ParseMode.MARKDOWN)
     except Forbidden: 
         logger.critical(f"FATAL: Bot not authorized for chat ID {TELEGRAM_CHAT_ID}."); return
-    logger.info("--- Binance Intelligent Engine Bot V6.8 (Wise Man Fully Activated) is now fully operational ---")
-
+    logger.info("--- Binance Intelligent Engine Bot is now fully operational ---")
+    
 async def post_shutdown(application: Application):
     if bot_data.exchange:
         await bot_data.exchange.close()
@@ -2040,5 +2054,6 @@ def main():
     
 if __name__ == '__main__':
     main()
+
 
 
