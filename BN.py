@@ -63,7 +63,7 @@ from telegram.constants import ParseMode
 from telegram.error import BadRequest, TimedOut, Forbidden
 # لا تضع هذا السطر داخل الدالة، بل في الأعلى
 from wise_man import WiseMan
-
+from smart_engine import EvolutionaryEngine
 # --- إعدادات أساسية ---
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -174,7 +174,7 @@ bot_data = BotState()
 wise_man = None
 scan_lock = asyncio.Lock()
 trade_management_lock = asyncio.Lock()
-
+smart_brain = None
 # --- وظائف مساعدة وقاعدة البيانات ---
 def load_settings():
     try:
@@ -1104,17 +1104,16 @@ class BinanceWebSocketManager:
         logger.info(f"Guardian: Attempting robust closure for trade #{trade_id} [{symbol}]. Reason: {reason}")
         
         try:
-            # --- [الحل النهائي V6.9] جعل عملية الإلغاء متسامحة مع سباق المهام ---
-            logger.info(f"[{symbol}] Step 1/3: Cancelling any existing open orders to free up assets...")
+            # الخطوة 1: إلغاء الأوامر المفتوحة مع تجاهل خطأ "OrderNotFound"
+            logger.info(f"[{symbol}] Step 1/3: Cancelling any existing open orders...")
             try:
                 await bot_data.exchange.cancel_all_orders(symbol)
                 logger.info(f"[{symbol}] Successfully sent cancel command.")
-            except ccxt.OrderNotFound as e:
-                # هذا الخطأ إيجابي، ويعني أن الأوامر تم إغلاقها أو تنفيذها بالفعل. نتجاهله ونكمل.
-                logger.warning(f"[{symbol}] Good error: OrderNotFound during cancellation means orders were likely already filled/closed. Continuing...")
+            except ccxt.OrderNotFound:
+                logger.warning(f"[{symbol}] Good error: OrderNotFound during cancellation means orders were likely already handled. Continuing...")
             await asyncio.sleep(1)
-            # ----------------------------------------------------------------
 
+            # الخطوة 2: التحقق من الرصيد الفعلي بعد التنظيف
             logger.info(f"[{symbol}] Step 2/3: Verifying actual asset balance...")
             balance = await bot_data.exchange.fetch_balance()
             base_currency = symbol.split('/')[0]
@@ -1122,18 +1121,19 @@ class BinanceWebSocketManager:
             quantity_to_sell = float(bot_data.exchange.amount_to_precision(symbol, quantity_in_db))
 
             if available_quantity < quantity_to_sell * 0.98:
-                error_msg = f"CRITICAL: Ghost trade detected for #{trade_id}. DB wants to sell {quantity_to_sell}, but wallet only has {available_quantity} after cleanup."
+                error_msg = f"CRITICAL: Ghost trade detected for #{trade_id}. DB wants to sell {quantity_to_sell}, but wallet only has {available_quantity}."
                 logger.error(error_msg)
                 async with aiosqlite.connect(DB_FILE) as conn:
                     await conn.execute("UPDATE trades SET status = ?, pnl_usdt = ? WHERE id = ?", (f'failed (ghost)', 0.0, trade_id))
                     await conn.commit()
                 await self.sync_subscriptions()
-                await safe_send_message(bot, f"🚨 تم اكتشاف صفقة شبحية #{trade_id} | {symbol}\nتم إلغاؤها.")
                 return
 
+            # الخطوة 3: تنفيذ أمر البيع
             logger.info(f"[{symbol}] Step 3/3: Executing market sell order for {quantity_to_sell} {base_currency}.")
             await bot_data.exchange.create_market_sell_order(symbol, quantity_to_sell)
             
+            # إذا نجح البيع، يتم حساب الربح وتحديث قاعدة البيانات
             pnl = (close_price - trade['entry_price']) * quantity_to_sell
             pnl_percent = (close_price / trade['entry_price'] - 1) * 100 if trade['entry_price'] > 0 else 0
             emoji = "✅" if pnl >= 0 else "🛑"
@@ -1145,13 +1145,24 @@ class BinanceWebSocketManager:
             await self.sync_subscriptions()
             await safe_send_message(bot, f"{emoji} **تم إغلاق الصفقة | #{trade_id} {symbol}**\n**السبب:** {reason}\n**الربح/الخسارة:** `${pnl:,.2f}` ({pnl_percent:+.2f}%)")
 
+            # --- [تفعيل المحرك التطوري] ---
+            try:
+                async with aiosqlite.connect(DB_FILE) as conn:
+                    conn.row_factory = aiosqlite.Row
+                    final_trade_details = await (await conn.execute("SELECT * FROM trades WHERE id = ?", (trade_id,))).fetchone()
+                    if final_trade_details:
+                        await smart_brain.add_trade_to_journal(dict(final_trade_details))
+            except Exception as e:
+                logger.error(f"Failed to pass trade #{trade_id} to smart brain for journaling: {e}")
+            # --------------------------------
+
         except Exception as e:
-            logger.critical(f"CRITICAL: The robust closure process for trade #{trade_id} failed entirely. MOVING TO INCUBATOR: {e}", exc_info=True)
+            # إذا فشلت العملية المحصنة، يتم نقل الصفقة إلى الحضانة
+            logger.critical(f"CRITICAL: Robust closure for #{trade_id} failed. MOVING TO INCUBATOR: {e}", exc_info=True)
             async with aiosqlite.connect(DB_FILE) as conn:
-                # --- [التعديل] تغيير الحالة إلى "تحت الحضانة" بدلاً من "فشل" ---
                 await conn.execute("UPDATE trades SET status = 'incubated' WHERE id = ?", (trade_id,))
                 await conn.commit()
-            await safe_send_message(bot, f"⚠️ **فشل الإغغلاق | #{trade_id} {symbol}**\nسيتم نقل الصفقة إلى الحضانة للمراقبة ومحاولة التعافي.")
+            await safe_send_message(bot, f"⚠️ **فشل الإغلاق | #{trade_id} {symbol}**\nسيتم نقل الصفقة إلى الحضانة للمراقبة ومحاولة التعافي.")
             await self.sync_subscriptions()
 
     async def sync_subscriptions(self):
@@ -1940,6 +1951,11 @@ async def post_init(application: Application):
     global wise_man
     wise_man = WiseMan(exchange=bot_data.exchange, application=application)
     # --------------------------
+
+    # --- [تفعيل] تفعيل المحرك التطوري (العقل الذكي) ---  # <--- الإضافة الجديدة هنا
+    global smart_brain
+    smart_brain = EvolutionaryEngine(exchange=bot_data.exchange)
+    # ----------------------------------------------------
 
     load_settings()
     await init_database()
