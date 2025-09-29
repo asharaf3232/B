@@ -7,10 +7,7 @@ from telegram.ext import Application
 from collections import defaultdict
 import asyncio
 
-# --- [الجديد] ---
-# نحتاج إلى استيراد بيانات البوت للوصول إلى الإعدادات
-# ملاحظة: تأكد من أن اسم الملف الرئيسي هو BN.py، إذا كان مختلفًا، غيّر الاسم أدناه
-from BN import bot_data 
+# لا يوجد أي استيراد من ملف BN.py هنا
 
 # --- إعدادات أساسية ---
 logger = logging.getLogger(__name__)
@@ -33,16 +30,16 @@ SECTOR_MAP = {
 }
 
 class WiseMan:
-    def __init__(self, exchange: ccxt.Exchange, application: Application):
+    def __init__(self, exchange: ccxt.Exchange, application: Application, bot_data: object):
         self.exchange = exchange
         self.application = application
+        self.bot_data = bot_data
         self.telegram_chat_id = application.bot_data.get('TELEGRAM_CHAT_ID')
         logger.info("🧠 Wise Man module initialized.")
 
     async def send_telegram_message(self, text):
         """دالة مساعدة لإرسال رسائل تليجرام بشكل آمن."""
         try:
-            # التأكد من أن bot ليس None قبل استخدامه
             if self.application and self.application.bot:
                 await self.application.bot.send_message(self.telegram_chat_id, text)
         except Exception as e:
@@ -71,11 +68,10 @@ class WiseMan:
                 symbol = trade['symbol']
                 try:
                     ohlcv = await self.exchange.fetch_ohlcv(symbol, '15m', limit=100)
-                    if not ohlcv: continue # تخطي العملة إذا لم يتم جلب بيانات
+                    if not ohlcv: continue
                     
                     df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                     
-                    # --- 1. منطق "اقطع خسائرك مبكرًا" ---
                     df['ema_fast'] = ta.ema(df['close'], length=10)
                     df['ema_slow'] = ta.ema(df['close'], length=30)
                     
@@ -84,9 +80,7 @@ class WiseMan:
                     is_weak = df['close'].iloc[-1] < df['ema_fast'].iloc[-1] and df['close'].iloc[-1] < df['ema_slow'].iloc[-1]
                     
                     if is_weak and (btc_df is not None and not btc_df['btc_momentum'].empty and btc_df['btc_momentum'].iloc[-1] < 0):
-                        
-                        # --- [التعديل الرئيسي: تطبيق الحل الهجين] ---
-                        if bot_data.settings.get("wise_man_auto_close", True):
+                        if self.bot_data.settings.get("wise_man_auto_close", True):
                             logger.warning(f"Wise Man recommends early exit for {symbol}. Flagging for Guardian.")
                             await conn.execute("UPDATE trades SET status = 'force_exit' WHERE id = ?", (trade['id'],))
                             await self.send_telegram_message(f"🧠 **إغلاق آلي | #{trade['id']} {symbol}**\nرصد الرجل الحكيم ضعفًا وقام بالخروج الفوري لحماية الأرباح.")
@@ -95,8 +89,7 @@ class WiseMan:
                             await self.send_telegram_message(f"💡 **نصيحة من الرجل الحكيم | #{trade['id']} {symbol}**\nتم رصد ضعف. يُنصح بالخروج اليدوي من هذه الصفقة.")
                         continue
 
-                    # --- 2. منطق "دع أرباحك تنمو" ---
-                    current_profit_pct = (df['close'].iloc[-1] / trade['entry_price'] - 1) * 100
+                    current_profit_pct = (df['close'].iloc[-1] / trade['entry_price'] - 1) * 100 if trade['entry_price'] > 0 else 0
                     adx_data = ta.adx(df['high'], df['low'], df['close'])
                     
                     if adx_data is None or adx_data.empty: continue
