@@ -124,10 +124,7 @@ DEFAULT_SETTINGS = {
     "dynamic_sizing_max_increase_pct": 25.0,
     "dynamic_sizing_max_decrease_pct": 50.0,
     "wise_man_auto_close": True, # أضف هذا السطر
-   "wise_man_logic": {
-    "extend_tp_profit_pct": 3.0,  # نسبة الربح المطلوبة لتمديد الهدف
-    "extend_tp_adx_level": 30.0   # مستوى ADX المطلوب لتمديد الهدف
-}, 
+    
 }
 
 STRATEGY_NAMES_AR = {
@@ -1038,81 +1035,85 @@ class BinanceWebSocketManager:
         except Exception as e:
             logger.error(f"Error handling WebSocket message: {e}", exc_info=True)
 
-
-async def _handle_ticker_update(self, ticker_data):
-    symbol = ticker_data['s'].replace('USDT', '/USDT')
-    current_price = float(ticker_data['c'])
-    
-    async with trade_management_lock:
-        try:
-            async with aiosqlite.connect(DB_FILE) as conn:
-                conn.row_factory = aiosqlite.Row
-                trade = await (await conn.execute("SELECT * FROM trades WHERE symbol = ? AND status IN ('active', 'force_exit', 'retry_exit')", (symbol,))).fetchone()
-                
-                if not trade:
-                    return
-
-                trade = dict(trade)
-                settings = bot_data.settings
-
-                should_close = False
-                close_reason = ""
-
-                if trade['status'] == 'force_exit':
-                    should_close = True
-                    close_reason = "فاشلة (بأمر الرجل الحكيم)"
-                elif trade['status'] == 'retry_exit':
-                    should_close = True
-                    close_reason = "فاشلة (SL-Incubator)"
-
-                if not should_close and trade['status'] == 'active':
-                    if current_price >= trade['take_profit']: 
-                        should_close = True
-                        close_reason = "ناجحة (TP)"
-                    elif current_price <= trade['stop_loss']:
-                        should_close = True
-                        reason = "فاشلة (SL)"
-                        if trade.get('trailing_sl_active', False):
-                            reason = "تم تأمين الربح (TSL)" if current_price > trade['entry_price'] else "فاشلة (TSL)"
-                        close_reason = reason
-                
-                if should_close:
-                    # --- [هذا هو السطر الحاسم الذي يجب إصلاحه] ---
-                    # يجب أن نمرر 'conn' كأول متغير
-                    await self._close_trade(conn, trade, close_reason, current_price)
-                    return
-
-                if trade['status'] == 'active':
-                    # ... (بقية منطق الوقف المتحرك والإشعارات يبقى كما هو) ...
-                    if settings['trailing_sl_enabled']:
-                        highest_price = max(trade.get('highest_price', 0), current_price)
-                        if highest_price > trade.get('highest_price', 0):
-                            await conn.execute("UPDATE trades SET highest_price = ? WHERE id = ?", (highest_price, trade['id']))
-
-                        if not trade.get('trailing_sl_active', False) and current_price >= trade['entry_price'] * (1 + settings['trailing_sl_activation_percent'] / 100):
-                            new_sl = trade['entry_price'] * 1.001
-                            if new_sl > trade['stop_loss']:
-                                await conn.execute("UPDATE trades SET trailing_sl_active = 1, stop_loss = ? WHERE id = ?", (new_sl, trade['id']))
-                                await safe_send_message(self.application.bot, f"🚀 **تأمين الأرباح! | #{trade['id']} {trade['symbol']}**\nتم رفع وقف الخسارة إلى نقطة الدخول: `${new_sl:.4f}`")
-                        
-                        if trade.get('trailing_sl_active', False):
-                            current_sl = (await (await conn.execute("SELECT stop_loss FROM trades WHERE id = ?", (trade['id'],))).fetchone())[0]
-                            new_sl_candidate = highest_price * (1 - settings['trailing_sl_callback_percent'] / 100)
-                            if new_sl_candidate > current_sl:
-                                await conn.execute("UPDATE trades SET stop_loss = ? WHERE id = ?", (new_sl_candidate, trade['id']))
-
-                    if settings.get('incremental_notifications_enabled', True):
-                        last_notified = trade.get('last_profit_notification_price', trade['entry_price'])
-                        increment = settings['incremental_notification_percent'] / 100
-                        if current_price >= last_notified * (1 + increment):
-                            profit_percent = ((current_price / trade['entry_price']) - 1) * 100
-                            await safe_send_message(self.application.bot, f"📈 **ربح متزايد! | #{trade['id']} {trade['symbol']}**\n**الربح الحالي:** `{profit_percent:+.2f}%`")
-                            await conn.execute("UPDATE trades SET last_profit_notification_price = ? WHERE id = ?", (current_price, trade['id']))
-                    
-                    await conn.commit()
+    async def _handle_ticker_update(self, ticker_data):
+        symbol = ticker_data['s'].replace('USDT', '/USDT')
+        current_price = float(ticker_data['c'])
         
-        except Exception as e:
-            logger.error(f"Guardian Ticker Error for {symbol}: {e}", exc_info=True)
+        async with trade_management_lock:
+            try:
+                async with aiosqlite.connect(DB_FILE) as conn:
+                    conn.row_factory = aiosqlite.Row
+                    # نبحث عن كل الحالات التي قد تستدعي أي إجراء
+                    trade = await (await conn.execute("SELECT * FROM trades WHERE symbol = ? AND status IN ('active', 'force_exit', 'retry_exit')", (symbol,))).fetchone()
+                    
+                    if not trade:
+                        return # إذا لم نجد صفقة، لا نفعل شيئًا
+
+                    trade = dict(trade)
+                    settings = bot_data.settings
+
+                    # --- [منطق الإغلاق الموحد] ---
+                    should_close = False
+                    close_reason = ""
+
+                    # 1. التحقق من توصيات المستشارين
+                    if trade['status'] == 'force_exit':
+                        should_close = True
+                        close_reason = "فاشلة (بأمر الرجل الحكيم)"
+                    elif trade['status'] == 'retry_exit':
+                        should_close = True
+                        close_reason = "فاشلة (SL-Incubator)"
+
+                    # 2. التحقق من الأهداف السعرية (فقط إذا كانت الصفقة نشطة)
+                    if not should_close and trade['status'] == 'active':
+                        if current_price >= trade['take_profit']: 
+                            should_close = True
+                            close_reason = "ناجحة (TP)"
+                        elif current_price <= trade['stop_loss']:
+                            should_close = True
+                            reason = "فاشلة (SL)"
+                            if trade.get('trailing_sl_active', False):
+                                reason = "تم تأمين الربح (TSL)" if current_price > trade['entry_price'] else "فاشلة (TSL)"
+                            close_reason = reason
+                    
+                    # --- [التنفيذ] ---
+                    if should_close:
+                        await self._close_trade(trade, close_reason, current_price)
+                        return # نخرج فورًا بعد بدء الإغلاق
+
+                    # --- [منطق إدارة الصفقات النشطة (يعمل فقط إذا لم يكن هناك قرار إغلاق)] ---
+                    if trade['status'] == 'active':
+                        # منطق الوقف المتحرك
+                        if settings['trailing_sl_enabled']:
+                            highest_price = max(trade.get('highest_price', 0), current_price)
+                            if highest_price > trade.get('highest_price', 0):
+                                await conn.execute("UPDATE trades SET highest_price = ? WHERE id = ?", (highest_price, trade['id']))
+
+                            if not trade.get('trailing_sl_active', False) and current_price >= trade['entry_price'] * (1 + settings['trailing_sl_activation_percent'] / 100):
+                                new_sl = trade['entry_price'] * 1.001
+                                if new_sl > trade['stop_loss']:
+                                    await conn.execute("UPDATE trades SET trailing_sl_active = 1, stop_loss = ? WHERE id = ?", (new_sl, trade['id']))
+                                    await safe_send_message(self.application.bot, f"🚀 **تأمين الأرباح! | #{trade['id']} {trade['symbol']}**\nتم رفع وقف الخسارة إلى نقطة الدخول: `${new_sl:.4f}`")
+                            
+                            if trade.get('trailing_sl_active', False): # نتحقق مرة أخرى في حال تم تفعيله للتو
+                                current_sl = (await (await conn.execute("SELECT stop_loss FROM trades WHERE id = ?", (trade['id'],))).fetchone())[0]
+                                new_sl_candidate = highest_price * (1 - settings['trailing_sl_callback_percent'] / 100)
+                                if new_sl_candidate > current_sl:
+                                    await conn.execute("UPDATE trades SET stop_loss = ? WHERE id = ?", (new_sl_candidate, trade['id']))
+
+                        # منطق إشعارات الربح
+                        if settings.get('incremental_notifications_enabled', True):
+                            last_notified = trade.get('last_profit_notification_price', trade['entry_price'])
+                            increment = settings['incremental_notification_percent'] / 100
+                            if current_price >= last_notified * (1 + increment):
+                                profit_percent = ((current_price / trade['entry_price']) - 1) * 100
+                                await safe_send_message(self.application.bot, f"📈 **ربح متزايد! | #{trade['id']} {trade['symbol']}**\n**الربح الحالي:** `{profit_percent:+.2f}%`")
+                                await conn.execute("UPDATE trades SET last_profit_notification_price = ? WHERE id = ?", (current_price, trade['id']))
+                        
+                        await conn.commit()
+            
+            except Exception as e:
+                logger.error(f"Guardian Ticker Error for {symbol}: {e}", exc_info=True)
 
 
     async def _close_trade(self, conn, trade, reason, close_price):
