@@ -1079,7 +1079,7 @@ class BinanceWebSocketManager:
                     
                     # --- [التنفيذ] ---
                     if should_close:
-                        await self._close_trade(trade, close_reason, current_price)
+                        await self._close_trade(conn, trade, close_reason, current_price)
                         return # نخرج فورًا بعد بدء الإغلاق
 
                     # --- [منطق إدارة الصفقات النشطة (يعمل فقط إذا لم يكن هناك قرار إغلاق)] ---
@@ -2051,4 +2051,5 @@ def main():
     
 if __name__ == '__main__':
     main()
+
 
