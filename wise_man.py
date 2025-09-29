@@ -7,19 +7,22 @@ from telegram.ext import Application
 from collections import defaultdict
 import asyncio
 
+# --- [الجديد] ---
+# نحتاج إلى استيراد بيانات البوت للوصول إلى الإعدادات
+from BN import bot_data 
+# ملاحظة: تأكد من أن اسم الملف الرئيسي هو BN.py، إذا كان مختلفًا، غيّر الاسم أعلاه
+
 # --- إعدادات أساسية ---
 logger = logging.getLogger(__name__)
 DB_FILE = 'trading_bot_v6.6_binance.db' 
 
 # --- قواعد إدارة مخاطر المحفظة ---
-# ملاحظة: من الأفضل لاحقًا نقل هذه القواعد إلى ملف الإعدادات الرئيسي
 PORTFOLIO_RISK_RULES = {
-    "max_asset_concentration_pct": 30.0,  # أقصى نسبة مئوية لأي أصل واحد في المحفظة
-    "max_sector_concentration_pct": 50.0, # أقصى نسبة مئوية لأي قطاع واحد في المحفظة
+    "max_asset_concentration_pct": 30.0,
+    "max_sector_concentration_pct": 50.0,
 }
 
 # --- قاموس تصنيف العملات حسب القطاع ---
-# هذا قاموس مبدئي يمكنك توسيعه بنفسك
 SECTOR_MAP = {
     'RNDR': 'AI', 'FET': 'AI', 'AGIX': 'AI',
     'UNI': 'DeFi', 'AAVE': 'DeFi', 'LDO': 'DeFi',
@@ -31,19 +34,19 @@ SECTOR_MAP = {
 
 class WiseMan:
     def __init__(self, exchange: ccxt.Exchange, application: Application):
-        """
-        يتم تهيئة الرجل الحكيم مع وصول للمنصة ولتطبيق تليجرام.
-        """
         self.exchange = exchange
         self.application = application
-        # نحتاج إلى الوصول إلى chat_id لإرسال الرسائل
         self.telegram_chat_id = application.bot_data.get('TELEGRAM_CHAT_ID')
         logger.info("🧠 Wise Man module initialized.")
 
+    async def send_telegram_message(self, text):
+        """دالة مساعدة لإرسال رسائل تليجرام بشكل آمن."""
+        try:
+            await self.application.bot.send_message(self.telegram_chat_id, text)
+        except Exception as e:
+            logger.error(f"Wise Man failed to send Telegram message: {e}")
+
     async def review_open_trades(self, context: object = None):
-        """
-        الدالة الرئيسية التي تمر على كل الصفقات المفتوحة وتطبق المنطق التكتيكي.
-        """
         logger.info("🧠 Wise Man: Starting periodic review of open trades...")
         async with aiosqlite.connect(DB_FILE) as conn:
             conn.row_factory = aiosqlite.Row
@@ -74,10 +77,19 @@ class WiseMan:
                     is_weak = df['close'].iloc[-1] < df['ema_fast'].iloc[-1] and df['close'].iloc[-1] < df['ema_slow'].iloc[-1]
                     
                     if is_weak and (btc_df is not None and btc_df['btc_momentum'].iloc[-1] < 0):
-                        logger.warning(f"Wise Man recommends early exit for {symbol}. Flagging for Guardian.")
-                        await conn.execute("UPDATE trades SET status = 'force_exit' WHERE id = ?", (trade['id'],))
-                        await self.application.bot.send_message(self.telegram_chat_id, f"🧠 **توصية من الرجل الحكيم | #{trade['id']} {symbol}**\nتم رصد ضعف. تم طلب الخروج المبكر من الحارس.")
-                        continue
+                        
+                        # --- [التعديل الرئيسي: تطبيق الحل الهجين] ---
+                        if bot_data.settings.get("wise_man_auto_close", True):
+                            # وضع القائد: أغلق الصفقة تلقائيًا
+                            logger.warning(f"Wise Man recommends early exit for {symbol}. Flagging for Guardian.")
+                            await conn.execute("UPDATE trades SET status = 'force_exit' WHERE id = ?", (trade['id'],))
+                            await self.send_telegram_message(f"🧠 **إغلاق آلي | #{trade['id']} {symbol}**\nرصد الرجل الحكيم ضعفًا وقام بالخروج الفوري لحماية الأرباح.")
+                        else:
+                            # وضع المستشار: أرسل توصية فقط
+                            logger.info(f"Wise Man advises manual exit for {symbol} due to weakness.")
+                            await self.send_telegram_message(f"💡 **نصيحة من الرجل الحكيم | #{trade['id']} {symbol}**\nتم رصد ضعف. يُنصح بالخروج اليدوي من هذه الصفقة.")
+                        # --- [نهاية التعديل] ---
+                        continue # ننتقل للصفقة التالية بعد اتخاذ إجراء
 
                     # --- 2. منطق "دع أرباحك تنمو" ---
                     current_profit_pct = (df['close'].iloc[-1] / trade['entry_price'] - 1) * 100
@@ -89,12 +101,12 @@ class WiseMan:
                         new_tp = trade['take_profit'] * 1.05
                         await conn.execute("UPDATE trades SET take_profit = ? WHERE id = ?", (new_tp, trade['id']))
                         logger.info(f"Wise Man recommends extending target for {symbol}. New TP: {new_tp}")
-                        await self.application.bot.send_message(self.telegram_chat_id, f"🧠 **نصيحة من الرجل الحكيم | #{trade['id']} {symbol}**\nتم رصد زخم قوي. تم تمديد الهدف إلى ${new_tp:.4f} للسماح للأرباح بالنمو.")
+                        await self.send_telegram_message(f"🧠 **نصيحة من الرجل الحكيم | #{trade['id']} {symbol}**\nتم رصد زخم قوي. تم تمديد الهدف إلى ${new_tp:.4f} للسماح للأرباح بالنمو.")
 
                 except Exception as e:
                     logger.error(f"Wise Man: Failed to analyze trade #{trade['id']} for {symbol}: {e}")
                 
-                await asyncio.sleep(2)
+                await asyncio.sleep(2) # فاصل زمني بسيط بين تحليل كل صفقة
             
             await conn.commit()
         logger.info("🧠 Wise Man: Trade review complete.")
@@ -107,7 +119,6 @@ class WiseMan:
         try:
             balance = await self.exchange.fetch_balance()
             
-            # [الإصلاح] التأكد من أننا نتعامل فقط مع القواميس وليس الأرقام أو أي شيء آخر
             assets = {
                 asset: data['total'] 
                 for asset, data in balance.items() 
@@ -124,7 +135,7 @@ class WiseMan:
             tickers = await self.exchange.fetch_tickers(asset_list)
             
             usdt_total = balance.get('USDT', {}).get('total', 0.0)
-            if not isinstance(usdt_total, float): usdt_total = 0.0 # حماية إضافية
+            if not isinstance(usdt_total, float): usdt_total = 0.0
             total_portfolio_value = usdt_total
 
             asset_values = {}
@@ -138,15 +149,13 @@ class WiseMan:
 
             if total_portfolio_value < 1.0: return
 
-            # ... باقي منطق التحليل كما هو ...
-            # (سيتم نسخه من الكود أدناه لضمان الكمال)
             for asset, value in asset_values.items():
                 concentration_pct = (value / total_portfolio_value) * 100
                 if concentration_pct > PORTFOLIO_RISK_RULES['max_asset_concentration_pct']:
                     message = (f"⚠️ **تنبيه من الرجل الحكيم (إدارة المخاطر):**\n"
                                f"تركيز المخاطر عالٍ! عملة `{asset}` تشكل **{concentration_pct:.1f}%** من قيمة المحفظة، "
                                f"وهو ما يتجاوز الحد المسموح به ({PORTFOLIO_RISK_RULES['max_asset_concentration_pct']}%).")
-                    await self.application.bot.send_message(self.telegram_chat_id, message)
+                    await self.send_telegram_message(message)
 
             sector_values = defaultdict(float)
             for asset, value in asset_values.items():
@@ -156,10 +165,10 @@ class WiseMan:
             for sector, value in sector_values.items():
                 concentration_pct = (value / total_portfolio_value) * 100
                 if concentration_pct > PORTFOLIO_RISK_RULES['max_sector_concentration_pct']:
-                     message = (f"⚠️ **تنبيه من الرجل الحكيم (إدارة المخاطر):**\n"
+                    message = (f"⚠️ **تنبيه من الرجل الحكيم (إدارة المخاطر):**\n"
                                f"تركيز قطاعي! أصول قطاع **'{sector}'** تشكل **{concentration_pct:.1f}%** من المحفظة، "
                                f"مما يعرضك لتقلبات هذا القطاع بشكل كبير (الحد المسموح به: {PORTFOLIO_RISK_RULES['max_sector_concentration_pct']}%).")
-                     await self.application.bot.send_message(self.telegram_chat_id, message)
+                    await self.send_telegram_message(message)
 
         except Exception as e:
             logger.error(f"Wise Man: Error during portfolio risk review: {e}", exc_info=True)
