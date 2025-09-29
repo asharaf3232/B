@@ -1043,20 +1043,17 @@ class BinanceWebSocketManager:
             try:
                 async with aiosqlite.connect(DB_FILE) as conn:
                     conn.row_factory = aiosqlite.Row
-                    # نبحث عن كل الحالات التي قد تستدعي أي إجراء
                     trade = await (await conn.execute("SELECT * FROM trades WHERE symbol = ? AND status IN ('active', 'force_exit', 'retry_exit')", (symbol,))).fetchone()
                     
                     if not trade:
-                        return # إذا لم نجد صفقة، لا نفعل شيئًا
+                        return
 
                     trade = dict(trade)
                     settings = bot_data.settings
 
-                    # --- [منطق الإغلاق الموحد] ---
                     should_close = False
                     close_reason = ""
 
-                    # 1. التحقق من توصيات المستشارين
                     if trade['status'] == 'force_exit':
                         should_close = True
                         close_reason = "فاشلة (بأمر الرجل الحكيم)"
@@ -1064,7 +1061,6 @@ class BinanceWebSocketManager:
                         should_close = True
                         close_reason = "فاشلة (SL-Incubator)"
 
-                    # 2. التحقق من الأهداف السعرية (فقط إذا كانت الصفقة نشطة)
                     if not should_close and trade['status'] == 'active':
                         if current_price >= trade['take_profit']: 
                             should_close = True
@@ -1076,14 +1072,13 @@ class BinanceWebSocketManager:
                                 reason = "تم تأمين الربح (TSL)" if current_price > trade['entry_price'] else "فاشلة (TSL)"
                             close_reason = reason
                     
-                    # --- [التنفيذ] ---
                     if should_close:
-                        await self._close_trade(trade, close_reason, current_price)
-                        return # نخرج فورًا بعد بدء الإغلاق
+                        # --- [هذا هو السطر الذي تم إصلاحه] ---
+                        # أضفنا 'conn' كأول متغير ليطابق التعريف الجديد للدالة
+                        await self._close_trade(conn, trade, close_reason, current_price)
+                        return
 
-                    # --- [منطق إدارة الصفقات النشطة (يعمل فقط إذا لم يكن هناك قرار إغلاق)] ---
                     if trade['status'] == 'active':
-                        # منطق الوقف المتحرك
                         if settings['trailing_sl_enabled']:
                             highest_price = max(trade.get('highest_price', 0), current_price)
                             if highest_price > trade.get('highest_price', 0):
@@ -1095,13 +1090,12 @@ class BinanceWebSocketManager:
                                     await conn.execute("UPDATE trades SET trailing_sl_active = 1, stop_loss = ? WHERE id = ?", (new_sl, trade['id']))
                                     await safe_send_message(self.application.bot, f"🚀 **تأمين الأرباح! | #{trade['id']} {trade['symbol']}**\nتم رفع وقف الخسارة إلى نقطة الدخول: `${new_sl:.4f}`")
                             
-                            if trade.get('trailing_sl_active', False): # نتحقق مرة أخرى في حال تم تفعيله للتو
+                            if trade.get('trailing_sl_active', False):
                                 current_sl = (await (await conn.execute("SELECT stop_loss FROM trades WHERE id = ?", (trade['id'],))).fetchone())[0]
                                 new_sl_candidate = highest_price * (1 - settings['trailing_sl_callback_percent'] / 100)
                                 if new_sl_candidate > current_sl:
                                     await conn.execute("UPDATE trades SET stop_loss = ? WHERE id = ?", (new_sl_candidate, trade['id']))
 
-                        # منطق إشعارات الربح
                         if settings.get('incremental_notifications_enabled', True):
                             last_notified = trade.get('last_profit_notification_price', trade['entry_price'])
                             increment = settings['incremental_notification_percent'] / 100
@@ -1114,7 +1108,6 @@ class BinanceWebSocketManager:
             
             except Exception as e:
                 logger.error(f"Guardian Ticker Error for {symbol}: {e}", exc_info=True)
-
 
     async def _close_trade(self, conn, trade, reason, close_price):
         symbol, trade_id = trade['symbol'], trade['id']
@@ -2054,6 +2047,7 @@ def main():
     
 if __name__ == '__main__':
     main()
+
 
 
 
