@@ -1979,7 +1979,7 @@ async def post_init(application: Application):
 
     # --- [تفعيل] تفعيل المحرك التطوري (العقل الذكي) ---  # <--- الإضافة الجديدة هنا
     global smart_brain
-    smart_brain = EvolutionaryEngine(exchange=bot_data.exchange)
+    smart_brain = EvolutionaryEngine(exchange=bot_data.exchange, application=application)
     # ----------------------------------------------------
 
     load_settings()
