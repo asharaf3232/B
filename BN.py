@@ -124,7 +124,8 @@ DEFAULT_SETTINGS = {
     "dynamic_sizing_max_increase_pct": 25.0,
     "dynamic_sizing_max_decrease_pct": 50.0,
     "wise_man_auto_close": True, # أضف هذا السطر
-    
+    "wise_man_strong_profit_pct": 3.0, # نسبة الربح لاعتبار الزخم قوياً
+    "wise_man_strong_adx_level": 30,   # مستوى ADX لاعتبار الاتجاه قوياً
 }
 
 STRATEGY_NAMES_AR = {
@@ -1261,9 +1262,17 @@ async def the_supervisor_job(context: ContextTypes.DEFAULT_TYPE):
     
     logger.info("🕵️ Supervisor: Audit and recovery checks complete.")
 # ... (بقية كود واجهة تليجرام يبقى كما هو بدون تغيير جوهري) ...
-# --- واجهة تليجرام المتقدمة (بدون تغيير) ---
+/**************************** CodeGeeX Inline Diff ****************************/
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    print(f"Received /start command from user {update.effective_user.id}")
     keyboard = [["Dashboard 🖥️"], ["الإعدادات ⚙️"]]
+    print(f"Created keyboard with options: {keyboard}")
+    reply_text = "أهلاً بك في **بوت باينانس V6.6 (المحرك المدقق)**"
+    print(f"Sending reply text: {reply_text}")
+    await update.message.reply_text(reply_text, reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True), parse_mode=ParseMode.MARKDOWN)
+    print("Successfully sent start command reply")
+    await update.message.reply_text("أهلاً بك في **بوت باينانس V6.6 (المحرك المدقق)**", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True), parse_mode=ParseMode.MARKDOWN)
+/******************** ea442203-295a-48c7-bc3a-56387a7ed9e6 ********************/
     await update.message.reply_text("أهلاً بك في **بوت باينانس V6.6 (المحرك المدقق)**", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True), parse_mode=ParseMode.MARKDOWN)
 
 async def manual_scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1651,6 +1660,7 @@ async def show_parameters_menu(update: Update, context: ContextTypes.DEFAULT_TYP
             if isinstance(current_level, dict) and key in current_level: current_level = current_level[key]
             else: return None
         return current_level
+        
     keyboard = [
         [InlineKeyboardButton("--- إعدادات عامة ---", callback_data="noop")],
         [InlineKeyboardButton(f"عدد العملات للفحص: {s['top_n_symbols_by_volume']}", callback_data="param_set_top_n_symbols_by_volume"),
@@ -1678,6 +1688,9 @@ async def show_parameters_menu(update: Update, context: ContextTypes.DEFAULT_TYP
         [InlineKeyboardButton(bool_format('adx_filter_enabled', 'فلتر ADX'), callback_data="param_toggle_adx_filter_enabled"),
          InlineKeyboardButton(f"مستوى فلتر ADX: {s['adx_filter_level']}", callback_data="param_set_adx_filter_level")],
         [InlineKeyboardButton(bool_format('news_filter_enabled', 'فلتر الأخبار والبيانات'), callback_data="param_toggle_news_filter_enabled")],
+        [InlineKeyboardButton("--- إعدادات الرجل الحكيم (حساسية الزخم) ---", callback_data="noop")],
+        [InlineKeyboardButton(f"نسبة الربح للزخم القوي (%): {s.get('wise_man_strong_profit_pct', 3.0)}", callback_data="param_set_wise_man_strong_profit_pct")],
+        [InlineKeyboardButton(f"مستوى ADX للزخم القوي: {s.get('wise_man_strong_adx_level', 30)}", callback_data="param_set_wise_man_strong_adx_level")],
         [InlineKeyboardButton("🔙 العودة للإعدادات", callback_data="settings_main")]
     ]
     await safe_edit_message(update.callback_query, "🎛️ **تعديل المعايير المتقدمة**\n\nاضغط على أي معيار لتعديل قيمته مباشرة:", reply_markup=InlineKeyboardMarkup(keyboard))
