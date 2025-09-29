@@ -1974,7 +1974,7 @@ async def post_init(application: Application):
 
     # --- تفعيل الرجل الحكيم ---
     global wise_man
-    wise_man = WiseMan(exchange=bot_data.exchange, application=application)
+    wise_man = WiseMan(exchange=bot_data.exchange, application=application, bot_data=bot_data)
     # --------------------------
 
     # --- [تفعيل] تفعيل المحرك التطوري (العقل الذكي) ---  # <--- الإضافة الجديدة هنا
