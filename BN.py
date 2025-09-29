@@ -124,7 +124,10 @@ DEFAULT_SETTINGS = {
     "dynamic_sizing_max_increase_pct": 25.0,
     "dynamic_sizing_max_decrease_pct": 50.0,
     "wise_man_auto_close": True, # أضف هذا السطر
-    
+   "wise_man_logic": {
+    "extend_tp_profit_pct": 3.0,  # نسبة الربح المطلوبة لتمديد الهدف
+    "extend_tp_adx_level": 30.0   # مستوى ADX المطلوب لتمديد الهدف
+}, 
 }
 
 STRATEGY_NAMES_AR = {
