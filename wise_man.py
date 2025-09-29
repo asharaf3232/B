@@ -9,8 +9,8 @@ import asyncio
 
 # --- [الجديد] ---
 # نحتاج إلى استيراد بيانات البوت للوصول إلى الإعدادات
+# ملاحظة: تأكد من أن اسم الملف الرئيسي هو BN.py، إذا كان مختلفًا، غيّر الاسم أدناه
 from BN import bot_data 
-# ملاحظة: تأكد من أن اسم الملف الرئيسي هو BN.py، إذا كان مختلفًا، غيّر الاسم أعلاه
 
 # --- إعدادات أساسية ---
 logger = logging.getLogger(__name__)
@@ -42,7 +42,9 @@ class WiseMan:
     async def send_telegram_message(self, text):
         """دالة مساعدة لإرسال رسائل تليجرام بشكل آمن."""
         try:
-            await self.application.bot.send_message(self.telegram_chat_id, text)
+            # التأكد من أن bot ليس None قبل استخدامه
+            if self.application and self.application.bot:
+                await self.application.bot.send_message(self.telegram_chat_id, text)
         except Exception as e:
             logger.error(f"Wise Man failed to send Telegram message: {e}")
 
@@ -69,32 +71,37 @@ class WiseMan:
                 symbol = trade['symbol']
                 try:
                     ohlcv = await self.exchange.fetch_ohlcv(symbol, '15m', limit=100)
+                    if not ohlcv: continue # تخطي العملة إذا لم يتم جلب بيانات
+                    
                     df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                     
                     # --- 1. منطق "اقطع خسائرك مبكرًا" ---
                     df['ema_fast'] = ta.ema(df['close'], length=10)
                     df['ema_slow'] = ta.ema(df['close'], length=30)
+                    
+                    if df['ema_fast'].isnull().iloc[-1] or df['ema_slow'].isnull().iloc[-1]: continue
+
                     is_weak = df['close'].iloc[-1] < df['ema_fast'].iloc[-1] and df['close'].iloc[-1] < df['ema_slow'].iloc[-1]
                     
-                    if is_weak and (btc_df is not None and btc_df['btc_momentum'].iloc[-1] < 0):
+                    if is_weak and (btc_df is not None and not btc_df['btc_momentum'].empty and btc_df['btc_momentum'].iloc[-1] < 0):
                         
                         # --- [التعديل الرئيسي: تطبيق الحل الهجين] ---
                         if bot_data.settings.get("wise_man_auto_close", True):
-                            # وضع القائد: أغلق الصفقة تلقائيًا
                             logger.warning(f"Wise Man recommends early exit for {symbol}. Flagging for Guardian.")
                             await conn.execute("UPDATE trades SET status = 'force_exit' WHERE id = ?", (trade['id'],))
                             await self.send_telegram_message(f"🧠 **إغلاق آلي | #{trade['id']} {symbol}**\nرصد الرجل الحكيم ضعفًا وقام بالخروج الفوري لحماية الأرباح.")
                         else:
-                            # وضع المستشار: أرسل توصية فقط
                             logger.info(f"Wise Man advises manual exit for {symbol} due to weakness.")
                             await self.send_telegram_message(f"💡 **نصيحة من الرجل الحكيم | #{trade['id']} {symbol}**\nتم رصد ضعف. يُنصح بالخروج اليدوي من هذه الصفقة.")
-                        # --- [نهاية التعديل] ---
-                        continue # ننتقل للصفقة التالية بعد اتخاذ إجراء
+                        continue
 
                     # --- 2. منطق "دع أرباحك تنمو" ---
                     current_profit_pct = (df['close'].iloc[-1] / trade['entry_price'] - 1) * 100
                     adx_data = ta.adx(df['high'], df['low'], df['close'])
-                    current_adx = adx_data['ADX_14'].iloc[-1] if adx_data is not None else 0
+                    
+                    if adx_data is None or adx_data.empty: continue
+                    current_adx = adx_data['ADX_14'].iloc[-1]
+                    
                     is_strong = current_profit_pct > 3.0 and current_adx > 30
 
                     if is_strong:
@@ -106,15 +113,12 @@ class WiseMan:
                 except Exception as e:
                     logger.error(f"Wise Man: Failed to analyze trade #{trade['id']} for {symbol}: {e}")
                 
-                await asyncio.sleep(2) # فاصل زمني بسيط بين تحليل كل صفقة
+                await asyncio.sleep(2)
             
             await conn.commit()
         logger.info("🧠 Wise Man: Trade review complete.")
 
     async def review_portfolio_risk(self, context: object = None):
-        """
-        تقوم هذه الدالة بفحص المحفظة ككل وإعطاء تنبيهات حول التركيز.
-        """
         logger.info("🧠 Wise Man: Starting portfolio risk review...")
         try:
             balance = await self.exchange.fetch_balance()
