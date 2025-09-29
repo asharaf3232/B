@@ -1262,7 +1262,7 @@ async def the_supervisor_job(context: ContextTypes.DEFAULT_TYPE):
     
     logger.info("🕵️ Supervisor: Audit and recovery checks complete.")
 # ... (بقية كود واجهة تليجرام يبقى كما هو بدون تغيير جوهري) ...
-/**************************** CodeGeeX Inline Diff ****************************/
+#/**************************** CodeGeeX Inline Diff ****************************/
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     print(f"Received /start command from user {update.effective_user.id}")
     keyboard = [["Dashboard 🖥️"], ["الإعدادات ⚙️"]]
@@ -1272,7 +1272,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(reply_text, reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True), parse_mode=ParseMode.MARKDOWN)
     print("Successfully sent start command reply")
     await update.message.reply_text("أهلاً بك في **بوت باينانس V6.6 (المحرك المدقق)**", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True), parse_mode=ParseMode.MARKDOWN)
-/******************** ea442203-295a-48c7-bc3a-56387a7ed9e6 ********************/
+#/******************** ea442203-295a-48c7-bc3a-56387a7ed9e6 ********************/
     await update.message.reply_text("أهلاً بك في **بوت باينانس V6.6 (المحرك المدقق)**", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True), parse_mode=ParseMode.MARKDOWN)
 
 async def manual_scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2051,3 +2051,4 @@ def main():
     
 if __name__ == '__main__':
     main()
+
