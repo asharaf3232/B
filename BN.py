@@ -191,61 +191,71 @@ trade_management_lock = asyncio.Lock()
 smart_brain = None
 # --- [إضافة جديدة] إعداد خادم الويب ---
 # --- [إضافة جديدة] وحدة بث السجلات الحية ---
+# --- [وحدة بث السجلات الحية - النسخة النهائية والمُحسّنة] ---
 class LogBroadcaster:
     def __init__(self):
         self.connections: list[WebSocket] = []
-        self.log_queue = asyncio.Queue()
+        # تحديد حجم أقصى لقائمة الانتظار لمنع استهلاك الذاكرة
+        self.log_queue = asyncio.Queue(maxsize=100)
 
     async def connect(self, websocket: WebSocket):
         await websocket.accept()
         self.connections.append(websocket)
 
     def disconnect(self, websocket: WebSocket):
-        self.connections.remove(websocket)
+        if websocket in self.connections:
+            self.connections.remove(websocket)
 
-    async def broadcast(self):
+    async def _broadcast_message(self, message: str):
+        # نستخدم نسخة من القائمة لتجنب الأخطاء إذا تم قطع اتصال أثناء الإرسال
+        for connection in list(self.connections):
+            try:
+                await connection.send_text(message)
+            except Exception:
+                # إذا فشل الإرسال، فهذا يعني أن الاتصال مغلق، لذا نزيله
+                self.disconnect(connection)
+
+    async def broadcast_loop(self):
+        """
+        هذه المهمة تعمل في الخلفية بشكل دائم، تسحب السجلات من قائمة الانتظار
+        وترسلها إلى كل المتصفحات المتصلة.
+        """
         while True:
             message = await self.log_queue.get()
-            for connection in self.connections:
-                try:
-                    await connection.send_text(message)
-                except WebSocketDisconnect:
-                    # تم إغلاق الاتصال من طرف العميل
-                    pass # سيتم إزالته في المرة القادمة
-                except Exception:
-                    # تجاهل الأخطاء لمنع توقف البث
-                    pass
+            await self._broadcast_message(message)
 
-# إنشاء نسخة من محطة البث
 log_broadcaster = LogBroadcaster()
 
 class WebsocketLogHandler(logging.Handler):
+    """
+    هذا هو "الأنبوب" الذي يربط نظام التسجيل العام للبوت
+    بمحطة البث المباشر.
+    """
     def emit(self, record):
         log_entry = self.format(record)
         try:
-            # نضع الرسالة في قائمة الانتظار ليتم بثها
+            # نضع السجل المنسق في قائمة الانتظار ليتم بثه
             log_broadcaster.log_queue.put_nowait(log_entry)
         except asyncio.QueueFull:
-            pass # تجاهل الرسالة إذا كانت القائمة ممتلئة لتجنب حظر البوت
-# --- نهاية الإضافة ---
+            # إذا كانت القائمة ممتلئة (ضغط شديد)، نتجاهل السجلات القديمة
+            pass
+
+# --- إعداد خادم الويب FastAPI ---
 app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=["*"], allow_credentials=True,
+    allow_methods=["*"], allow_headers=["*"],
 )
 
-@app.get("/")
+@app.get("/", response_class=HTMLResponse)
 async def read_index():
-    with open("index.html") as f:
-        return HTMLResponse(f.read())
+    with open("index.html", "r", encoding="utf-8") as f:
+        return HTMLResponse(content=f.read())
 
 @app.get("/active_trades")
 async def get_active_trades():
-    # ... (هذه الدالة تبقى كما هي)
     try:
         async with aiosqlite.connect(DB_FILE) as conn:
             conn.row_factory = aiosqlite.Row
@@ -255,15 +265,16 @@ async def get_active_trades():
     except Exception as e:
         return {"error": str(e)}
 
-# --- [إضافة جديدة] نقطة نهاية البث المباشر ---
 @app.websocket("/ws/logs")
 async def websocket_endpoint(websocket: WebSocket):
     await log_broadcaster.connect(websocket)
     try:
+        # نبقي الاتصال مفتوحاً وننتظر أي رسالة (لن يحدث)
+        # هذا فقط لإبقاء الاتصال حيًا حتى يغلقه المتصفح
         while True:
-            # إبقاء الاتصال مفتوحاً لاستقبال أي بيانات من العميل (غير مستخدم حالياً)
             await websocket.receive_text()
     except WebSocketDisconnect:
+        # عندما يغلق المستخدم الصفحة، يتم تنفيذ هذا الجزء
         log_broadcaster.disconnect(websocket)
 # --- نهاية الإضافة ---
 async def read_index():
@@ -2164,19 +2175,19 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
 # --- دوال التشغيل والإيقاف الرئيسية ---
 # ==============================================================================
 async def post_init(application: Application):
-    # --- [إضافة جديدة] تفعيل التقاط السجلات ---
+    # --- [النسخة النهائية] تفعيل التقاط السجلات للبث المباشر ---
     handler = WebsocketLogHandler()
-    # يمكنك التحكم بمستوى السجلات التي تظهر (INFO, WARNING, ERROR)
-    handler.setLevel(logging.INFO) 
-    # قم بتنسيق شكل الرسالة التي ستظهر في الويب
-    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s', datefmt='%H:%M:%S')
+    handler.setLevel(logging.INFO)
+    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s', datefmt='%H:%M:%S')
     handler.setFormatter(formatter)
     logging.getLogger().addHandler(handler)
-    # ابدأ مهمة البث في الخلفية
-    asyncio.create_task(log_broadcaster.broadcast())
-    # --- نهاية الإضافة ---
+    
+    # نتأكد من أن مهمة البث تبدأ مرة واحدة فقط عند تشغيل البوت
+    if not hasattr(post_init, "broadcast_task_started"):
+        asyncio.create_task(log_broadcaster.broadcast_loop())
+        post_init.broadcast_task_started = True
+    # --- نهاية قسم تفعيل السجلات ---
 
-    logger.info("Performing post-initialization setup...")
     logger.info("Performing post-initialization setup for Intelligent Engine Bot...")
     if not all([TELEGRAM_BOT_TOKEN, BINANCE_API_KEY, BINANCE_API_SECRET, TELEGRAM_CHAT_ID]):
         logger.critical("FATAL: Missing one or more required environment variables."); return
@@ -2209,7 +2220,7 @@ async def post_init(application: Application):
     wise_man = WiseMan(exchange=bot_data.exchange, application=application, bot_data=bot_data)
     # --------------------------
 
-    # --- [تفعيل] تفعيل المحرك التطوري (العقل الذكي) ---  # <--- الإضافة الجديدة هنا
+    # --- [تفعيل] تفعيل المحرك التطوري (العقل الذكي) ---
     global smart_brain
     smart_brain = EvolutionaryEngine(exchange=bot_data.exchange, application=application)
     # ----------------------------------------------------
@@ -2235,8 +2246,6 @@ async def post_init(application: Application):
     jq.run_repeating(propose_strategy_changes, interval=STRATEGY_ANALYSIS_INTERVAL_SECONDS, first=120, name="propose_strategy_changes")
 
     # --- جدولة مهام الرجل الحكيم ---
-    # --- [تعطيل] ---
-    #jq.run_repeating(wise_man.review_open_trades, interval=1800, first=45, name="wise_man_trade_review")
     # مراجعة مخاطر المحفظة كل ساعة
     jq.run_repeating(wise_man.review_portfolio_risk, interval=3600, first=90, name="wise_man_portfolio_review")
     # ---------------------------------
@@ -2247,7 +2256,6 @@ async def post_init(application: Application):
     except Forbidden: 
         logger.critical(f"FATAL: Bot not authorized for chat ID {TELEGRAM_CHAT_ID}."); return
     logger.info("--- Binance Intelligent Engine Bot V6.8 (Wise Man Fully Activated) is now fully operational ---")
-
 async def post_shutdown(application: Application):
     if bot_data.exchange:
         await bot_data.exchange.close()
@@ -2283,5 +2291,4 @@ def main():
 
 if __name__ == '__main__':
     main()
-
 
