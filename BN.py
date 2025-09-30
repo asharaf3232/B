@@ -72,7 +72,48 @@ from smart_engine import EvolutionaryEngine
 # --- إعدادات أساسية ---
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
+# --- [الحل النهائي للبث المباشر] ---
+# نحتفظ بالدوال الأصلية للتسجيل
+_original_log_info = logger.info
+_original_log_warning = logger.warning
+_original_log_error = logger.error
+_original_log_critical = logger.critical
 
+# نُعرّف دوال جديدة تقوم بوظيفتين: التسجيل العادي، وإرسال نسخة للمتصفح
+def new_log_info(msg, *args, **kwargs):
+    _original_log_info(msg, *args, **kwargs)
+    try:
+        formatted_msg = f"{datetime.now().strftime('%H:%M:%S')} - INFO - {msg}"
+        log_broadcaster.log_queue.put_nowait(formatted_msg)
+    except (asyncio.QueueFull, Exception): pass
+
+def new_log_warning(msg, *args, **kwargs):
+    _original_log_warning(msg, *args, **kwargs)
+    try:
+        formatted_msg = f"{datetime.now().strftime('%H:%M:%S')} - WARNING - {msg}"
+        log_broadcaster.log_queue.put_nowait(formatted_msg)
+    except (asyncio.QueueFull, Exception): pass
+        
+def new_log_error(msg, *args, **kwargs):
+    _original_log_error(msg, *args, **kwargs)
+    try:
+        formatted_msg = f"{datetime.now().strftime('%H:%M:%S')} - ERROR - {msg}"
+        log_broadcaster.log_queue.put_nowait(formatted_msg)
+    except (asyncio.QueueFull, Exception): pass
+        
+def new_log_critical(msg, *args, **kwargs):
+    _original_log_critical(msg, *args, **kwargs)
+    try:
+        formatted_msg = f"{datetime.now().strftime('%H:%M:%S')} - CRITICAL - {msg}"
+        log_broadcaster.log_queue.put_nowait(formatted_msg)
+    except (asyncio.QueueFull, Exception): pass
+
+# نستبدل دوال التسجيل القديمة بالنسخ الجديدة والمطورة
+logger.info = new_log_info
+logger.warning = new_log_warning
+logger.error = new_log_error
+logger.critical = new_log_critical
+# --- [نهاية الحل النهائي] ---
 # --- جلب المتغيرات من بيئة التشغيل ---
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
@@ -226,19 +267,6 @@ class LogBroadcaster:
 
 log_broadcaster = LogBroadcaster()
 
-class WebsocketLogHandler(logging.Handler):
-    """
-    هذا هو "الأنبوب" الذي يربط نظام التسجيل العام للبوت
-    بمحطة البث المباشر.
-    """
-    def emit(self, record):
-        log_entry = self.format(record)
-        try:
-            # نضع السجل المنسق في قائمة الانتظار ليتم بثه
-            log_broadcaster.log_queue.put_nowait(log_entry)
-        except asyncio.QueueFull:
-            # إذا كانت القائمة ممتلئة (ضغط شديد)، نتجاهل السجلات القديمة
-            pass
 
 # --- إعداد خادم الويب FastAPI ---
 app = FastAPI()
@@ -2175,19 +2203,10 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
 # --- دوال التشغيل والإيقاف الرئيسية ---
 # ==============================================================================
 async def post_init(application: Application):
-    # --- [النسخة النهائية] تفعيل التقاط السجلات للبث المباشر ---
-    handler = WebsocketLogHandler()
-    handler.setLevel(logging.INFO)
-    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s', datefmt='%H:%M:%S')
-    handler.setFormatter(formatter)
-    logging.getLogger().addHandler(handler)
-    
-    # نتأكد من أن مهمة البث تبدأ مرة واحدة فقط عند تشغيل البوت
+    # نتأكد من أن مهمة البث للمتصفح تبدأ مرة واحدة فقط عند تشغيل البوت
     if not hasattr(post_init, "broadcast_task_started"):
         asyncio.create_task(log_broadcaster.broadcast_loop())
         post_init.broadcast_task_started = True
-        logger.critical("!!!!!!!!!! رسالة اختبار حرجة من البوت !!!!!!!!!!!")
-    # --- نهاية قسم تفعيل السجلات ---
 
     logger.info("Performing post-initialization setup for Intelligent Engine Bot...")
     if not all([TELEGRAM_BOT_TOKEN, BINANCE_API_KEY, BINANCE_API_SECRET, TELEGRAM_CHAT_ID]):
@@ -2256,8 +2275,7 @@ async def post_init(application: Application):
         await application.bot.send_message(TELEGRAM_CHAT_ID, "*🤖 بوت باينانس V6.8 (الرجل الحكيم مفعل بالكامل) - بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
     except Forbidden: 
         logger.critical(f"FATAL: Bot not authorized for chat ID {TELEGRAM_CHAT_ID}."); return
-    logger.info("--- Binance Intelligent Engine Bot V6.8 (Wise Man Fully Activated) is now fully operational ---")
-async def post_shutdown(application: Application):
+    logger.info("--- Binance Intelligent Engine Bot V6.8 (Wise Man Fully Activated) is now fully operational ---")async def post_shutdown(application: Application):
     if bot_data.exchange:
         await bot_data.exchange.close()
     if bot_data.websocket_manager:
@@ -2292,5 +2310,4 @@ def main():
 
 if __name__ == '__main__':
     main()
-
 
