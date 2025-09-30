@@ -7,19 +7,12 @@ from telegram.ext import Application
 from collections import defaultdict
 import asyncio
 
-# لا يوجد أي استيراد من ملف BN.py هنا
-
-# --- إعدادات أساسية ---
 logger = logging.getLogger(__name__)
 DB_FILE = 'trading_bot_v6.6_binance.db' 
-
-# --- قواعد إدارة مخاطر المحفظة ---
 PORTFOLIO_RISK_RULES = {
     "max_asset_concentration_pct": 30.0,
     "max_sector_concentration_pct": 50.0,
 }
-
-# --- قاموس تصنيف العملات حسب القطاع ---
 SECTOR_MAP = {
     'RNDR': 'AI', 'FET': 'AI', 'AGIX': 'AI',
     'UNI': 'DeFi', 'AAVE': 'DeFi', 'LDO': 'DeFi',
@@ -35,86 +28,70 @@ class WiseMan:
         self.application = application
         self.bot_data = bot_data
         self.telegram_chat_id = application.bot_data.get('TELEGRAM_CHAT_ID')
-        logger.info("🧠 Wise Man module initialized.")
+        logger.info("🧠 Wise Man module initialized as an On-Demand Tactical Advisor.")
 
     async def send_telegram_message(self, text):
         """دالة مساعدة لإرسال رسائل تليجرام بشكل آمن."""
         try:
             if self.application and self.application.bot:
-                await self.application.bot.send_message(self.telegram_chat_id, text)
+                await self.application.bot.send_message(self.telegram_chat_id, text, parse_mode='Markdown')
         except Exception as e:
             logger.error(f"Wise Man failed to send Telegram message: {e}")
 
-    async def review_open_trades(self, context: object = None):
-        logger.info("🧠 Wise Man: Starting periodic review of open trades...")
-        async with aiosqlite.connect(DB_FILE) as conn:
-            conn.row_factory = aiosqlite.Row
-            active_trades = await (await conn.execute("SELECT * FROM trades WHERE status = 'active'")).fetchall()
+    async def perform_deep_analysis(self, trade: dict):
+        """
+        [الوظيفة الجديدة] يتم استدعاء هذه الدالة لتحليل صفقة واحدة فقط بشكل عميق وفوري.
+        """
+        symbol = trade['symbol']
+        trade_id = trade['id']
+        logger.info(f"🧠 Wise Man summoned for deep analysis of trade #{trade_id} [{symbol}]...")
 
-            if not active_trades:
-                logger.info("🧠 Wise Man: No active trades to review.")
-                return
+        try:
+            async with aiosqlite.connect(DB_FILE) as conn:
+                # جلب بيانات السوق والبيتكوين بالتوازي لزيادة السرعة
+                ohlcv_task = self.exchange.fetch_ohlcv(symbol, '15m', limit=100)
+                btc_ohlcv_task = self.exchange.fetch_ohlcv('BTC/USDT', '1h', limit=100)
+                ohlcv, btc_ohlcv = await asyncio.gather(ohlcv_task, btc_ohlcv_task)
 
-            settings = self.bot_data.settings
+                if not ohlcv:
+                    logger.warning(f"Wise Man Analysis Canceled: Could not fetch OHLCV for {symbol}.")
+                    return
 
-            try:
-                btc_ohlcv = await self.exchange.fetch_ohlcv('BTC/USDT', '1h', limit=100)
-                btc_df = pd.DataFrame(btc_ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-                btc_df['btc_momentum'] = ta.mom(btc_df['close'], length=10)
-            except Exception as e:
-                logger.error(f"Wise Man: Could not fetch BTC data for comparison: {e}")
-                btc_df = None
+                df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                df['ema_fast'] = ta.ema(df['close'], length=10)
+                df['ema_slow'] = ta.ema(df['close'], length=30)
 
-            for trade_data in active_trades:
-                trade = dict(trade_data)
-                symbol = trade['symbol']
-                try:
-                    ohlcv = await self.exchange.fetch_ohlcv(symbol, '15m', limit=100)
-                    if not ohlcv: continue
-                    
-                    df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-                    
-                    df['ema_fast'] = ta.ema(df['close'], length=10)
-                    df['ema_slow'] = ta.ema(df['close'], length=30)
-                    
-                    if df['ema_fast'].isnull().iloc[-1] or df['ema_slow'].isnull().iloc[-1]: continue
+                is_weak = df['close'].iloc[-1] < df['ema_fast'].iloc[-1] and df['close'].iloc[-1] < df['ema_slow'].iloc[-1]
 
-                    is_weak = df['close'].iloc[-1] < df['ema_fast'].iloc[-1] and df['close'].iloc[-1] < df['ema_slow'].iloc[-1]
-                    
-                    if is_weak and (btc_df is not None and not btc_df.empty and btc_df['btc_momentum'].iloc[-1] < 0):
-                        if settings.get("wise_man_auto_close", True):
-                            await conn.execute("UPDATE trades SET status = 'force_exit' WHERE id = ?", (trade['id'],))
-                            await self.send_telegram_message(f"🧠 **إغلاق آلي | #{trade['id']} {symbol}**\nرصد الرجل الحكيم ضعفًا وقام بالخروج الفوري لحماية الأرباح.")
-                        else:
-                            await self.send_telegram_message(f"💡 **نصيحة من الرجل الحكيم | #{trade['id']} {symbol}**\nتم رصد ضعف. يُنصح بالخروج اليدوي من هذه الصفقة.")
-                        continue
-
-                    strong_profit_pct = settings.get('wise_man_strong_profit_pct', 3.0)
-                    strong_adx_level = settings.get('wise_man_strong_adx_level', 30)
-
-                    current_profit_pct = (df['close'].iloc[-1] / trade['entry_price'] - 1) * 100 if trade['entry_price'] > 0 else 0
-                    adx_data = ta.adx(df['high'], df['low'], df['close'])
-                    
-                    if adx_data is None or adx_data.empty: continue
-                    current_adx = adx_data['ADX_14'].iloc[-1]
-                    
-                    is_strong = current_profit_pct > strong_profit_pct and current_adx > strong_adx_level
-
-                    if is_strong:
-                        new_tp = trade['take_profit'] * 1.05
-                        await conn.execute("UPDATE trades SET take_profit = ? WHERE id = ?", (new_tp, trade['id']))
-                        await self.send_telegram_message(f"🧠 **نصيحة من الرجل الحكيم | #{trade['id']} {symbol}**\nتم رصد زخم قوي. تم تمديد الهدف إلى ${new_tp:.4f} للسماح للأرباح بالنمو.")
-
-                except Exception as e:
-                    logger.error(f"Wise Man: Failed to analyze trade #{trade['id']} for {symbol}: {e}")
+                # تحليل البيتكوين
+                btc_is_bearish = False
+                if btc_ohlcv:
+                    btc_df = pd.DataFrame(btc_ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                    btc_df['btc_momentum'] = ta.mom(btc_df['close'], length=10)
+                    if not btc_df.empty:
+                        btc_is_bearish = btc_df['btc_momentum'].iloc[-1] < 0
                 
-                await asyncio.sleep(2)
-            
-            await conn.commit()
-        logger.info("🧠 Wise Man: Trade review complete.")
+                logger.info(f"Analysis for {symbol}: is_weak={is_weak}, btc_is_bearish={btc_is_bearish}")
+
+                if is_weak and btc_is_bearish:
+                    settings = self.bot_data.settings
+                    if settings.get("wise_man_auto_close", True):
+                        await conn.execute("UPDATE trades SET status = 'force_exit' WHERE id = ?", (trade_id,))
+                        await self.send_telegram_message(f"🧠 **إغلاق آلي فوري** | `#{trade_id} {symbol}`\nأظهر التحليل العميق ضعفاً حاداً.")
+                    else:
+                        await self.send_telegram_message(f"💡 **تحذير تكتيكي** | `#{trade_id} {symbol}`\nرصد ضعف حاد. يُنصح بالخروج اليدوي.")
+                    await conn.commit()
+                else:
+                    logger.info(f"Wise Man Deep Analysis Concluded: No critical weakness found for {symbol}.")
+
+        except Exception as e:
+            logger.error(f"Wise Man: Deep analysis failed for trade #{trade_id}: {e}", exc_info=True)
 
     async def review_portfolio_risk(self, context: object = None):
-        logger.info("🧠 Wise Man: Starting portfolio risk review...")
+        """
+        تقوم هذه الدالة بفحص المحفظة ككل وإعطاء تنبيهات حول التركيز.
+        """
+        logger.info("🧠 Wise Man: Starting periodic portfolio risk review...")
         try:
             balance = await self.exchange.fetch_balance()
             
