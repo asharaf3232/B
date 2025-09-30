@@ -191,61 +191,60 @@ trade_management_lock = asyncio.Lock()
 smart_brain = None
 # --- [إضافة جديدة] إعداد خادم الويب ---
 # --- [إضافة جديدة] وحدة بث السجلات الحية ---
+# --- [وحدة بث السجلات الحية - النسخة النهائية] ---
 class LogBroadcaster:
     def __init__(self):
         self.connections: list[WebSocket] = []
-        self.log_queue = asyncio.Queue()
+        self.log_queue = asyncio.Queue(maxsize=100) # تحديد حجم أقصى للقائمة
 
     async def connect(self, websocket: WebSocket):
         await websocket.accept()
         self.connections.append(websocket)
 
     def disconnect(self, websocket: WebSocket):
-        self.connections.remove(websocket)
+        if websocket in self.connections:
+            self.connections.remove(websocket)
 
-    async def broadcast(self):
+    async def _broadcast_message(self, message: str):
+        # استخدام list(self.connections) لإنشاء نسخة وتجنب المشاكل عند تعديل القائمة أثناء العمل
+        for connection in list(self.connections):
+            try:
+                await connection.send_text(message)
+            except Exception:
+                # إذا فشل الإرسال، افترض أن الاتصال مغلق وقم بإزالته
+                self.disconnect(connection)
+
+    async def broadcast_loop(self):
         while True:
             message = await self.log_queue.get()
-            for connection in self.connections:
-                try:
-                    await connection.send_text(message)
-                except WebSocketDisconnect:
-                    # تم إغلاق الاتصال من طرف العميل
-                    pass # سيتم إزالته في المرة القادمة
-                except Exception:
-                    # تجاهل الأخطاء لمنع توقف البث
-                    pass
+            await self._broadcast_message(message)
 
-# إنشاء نسخة من محطة البث
 log_broadcaster = LogBroadcaster()
 
 class WebsocketLogHandler(logging.Handler):
     def emit(self, record):
         log_entry = self.format(record)
         try:
-            # نضع الرسالة في قائمة الانتظار ليتم بثها
             log_broadcaster.log_queue.put_nowait(log_entry)
         except asyncio.QueueFull:
-            pass # تجاهل الرسالة إذا كانت القائمة ممتلئة لتجنب حظر البوت
-# --- نهاية الإضافة ---
+            pass # تجاهل السجلات القديمة إذا كان هناك ضغط كبير
+
+# --- إعداد خادم الويب FastAPI ---
 app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=["*"], allow_credentials=True,
+    allow_methods=["*"], allow_headers=["*"],
 )
 
-@app.get("/")
+@app.get("/", response_class=HTMLResponse)
 async def read_index():
-    with open("index.html") as f:
-        return HTMLResponse(f.read())
+    with open("index.html", "r", encoding="utf-8") as f:
+        return HTMLResponse(content=f.read())
 
 @app.get("/active_trades")
 async def get_active_trades():
-    # ... (هذه الدالة تبقى كما هي)
     try:
         async with aiosqlite.connect(DB_FILE) as conn:
             conn.row_factory = aiosqlite.Row
@@ -255,14 +254,12 @@ async def get_active_trades():
     except Exception as e:
         return {"error": str(e)}
 
-# --- [إضافة جديدة] نقطة نهاية البث المباشر ---
 @app.websocket("/ws/logs")
 async def websocket_endpoint(websocket: WebSocket):
     await log_broadcaster.connect(websocket)
     try:
         while True:
-            # إبقاء الاتصال مفتوحاً لاستقبال أي بيانات من العميل (غير مستخدم حالياً)
-            await websocket.receive_text()
+            await websocket.receive_text() # إبقاء الاتصال حيًا
     except WebSocketDisconnect:
         log_broadcaster.disconnect(websocket)
 # --- نهاية الإضافة ---
