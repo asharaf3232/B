@@ -4,8 +4,8 @@ import pandas as pd
 import pandas_ta as ta
 import ccxt.async_support as ccxt
 from telegram.ext import Application
-from collections import defaultdict
 import asyncio
+from collections import defaultdict
 
 logger = logging.getLogger(__name__)
 DB_FILE = 'trading_bot_v6.6_binance.db' 
@@ -38,6 +38,9 @@ class WiseMan:
             logger.error(f"Wise Man failed to send Telegram message: {e}")
 
     async def perform_deep_analysis(self, trade: dict):
+        """
+        [لقطع الخسائر] يتم استدعاء هذه الدالة لتحليل صفقة واحدة بشكل عميق وفوري.
+        """
         symbol = trade['symbol']
         trade_id = trade['id']
         logger.info(f"🧠 Wise Man summoned for deep analysis of trade #{trade_id} [{symbol}]...")
@@ -80,16 +83,55 @@ class WiseMan:
         except Exception as e:
             logger.error(f"Wise Man: Deep analysis failed for trade #{trade_id}: {e}", exc_info=True)
 
+    async def check_for_strong_momentum(self, trade: dict):
+        """
+        [لتمديد الأرباح] يتم استدعاؤها عند تحقيق ربح متزايد للتحقق من الزخم وتمديد الهدف.
+        """
+        symbol = trade['symbol']
+        trade_id = trade['id']
+        logger.info(f"🧠 Wise Man summoned to check strong momentum for trade #{trade_id} [{symbol}]...")
+
+        try:
+            ohlcv = await self.exchange.fetch_ohlcv(symbol, '15m', limit=50)
+            if not ohlcv: return
+
+            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            adx_data = df.ta.adx()
+
+            if adx_data is None or adx_data.empty: return
+            current_adx = adx_data.iloc[-1]['ADX_14']
+            
+            settings = self.bot_data.settings
+            strong_adx_level = settings.get('wise_man_strong_adx_level', 30)
+
+            if current_adx > strong_adx_level:
+                async with aiosqlite.connect(DB_FILE) as conn:
+                    current_price = df['close'].iloc[-1]
+                    df.ta.atr(append=True, length=14)
+                    atr_col = next((col for col in df.columns if col.startswith('ATRr_')), None)
+                    if not atr_col: return
+                    
+                    atr = df.iloc[-1].get(atr_col, 0)
+                    new_tp = current_price + (atr * settings.get('risk_reward_ratio', 2.0))
+                    
+                    if new_tp > trade['take_profit']:
+                        await conn.execute("UPDATE trades SET take_profit = ? WHERE id = ?", (new_tp, trade_id))
+                        await conn.commit()
+                        await self.send_telegram_message(f"🧠 **تمديد الهدف!** | `#{trade_id} {symbol}`\nتم رصد زخم قوي، تم رفع الهدف إلى `${new_tp:.4f}`")
+                        logger.info(f"Wise Man extended TP for trade #{trade_id} to {new_tp} due to strong momentum (ADX: {current_adx}).")
+
+        except Exception as e:
+            logger.error(f"Wise Man: Strong momentum check failed for trade #{trade_id}: {e}", exc_info=True)
+
     async def review_portfolio_risk(self, context: object = None):
+        """
+        تقوم هذه الدالة بفحص المحفظة ككل وإعطاء تنبيهات حول التركيز.
+        """
         logger.info("🧠 Wise Man: Starting periodic portfolio risk review...")
         try:
             balance = await self.exchange.fetch_balance()
             
-            assets = {
-                asset: data['total'] 
-                for asset, data in balance.items() 
-                if isinstance(data, dict) and data.get('total', 0) > 0.00001 and asset != 'USDT'
-            }
+            assets = { asset: data['total'] for asset, data in balance.items() if isinstance(data, dict) and data.get('total', 0) > 0.00001 and asset != 'USDT' }
             
             if not assets:
                 logger.info("🧠 Wise Man: Portfolio is empty (only USDT). No risks to analyze.")
