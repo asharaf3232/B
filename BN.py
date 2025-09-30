@@ -2275,10 +2275,12 @@ async def post_init(application: Application):
         await application.bot.send_message(TELEGRAM_CHAT_ID, "*🤖 بوت باينانس V6.8 (الرجل الحكيم مفعل بالكامل) - بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
     except Forbidden: 
         logger.critical(f"FATAL: Bot not authorized for chat ID {TELEGRAM_CHAT_ID}."); return
-    logger.info("--- Binance Intelligent Engine Bot V6.8 (Wise Man Fully Activated) is now fully operational ---")async def post_shutdown(application: Application):
-    if bot_data.exchange:
+    logger.info("--- Binance Intelligent Engine Bot V6.8 (Wise Man Fully Activated) is now fully operational ---")
+    async def post_shutdown(application: Application):
+    
+     if bot_data.exchange:
         await bot_data.exchange.close()
-    if bot_data.websocket_manager:
+     if bot_data.websocket_manager:
         await bot_data.websocket_manager.stop()
     logger.info("Bot has shut down gracefully.")
 
