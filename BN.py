@@ -31,7 +31,9 @@ from collections import defaultdict, Counter
 import httpx
 import re
 import aiosqlite
-
+from fastapi import FastAPI
+import uvicorn
+import threading
 # --- مكتبات التحليل والتداول ---
 import pandas as pd
 import pandas_ta as ta
@@ -184,6 +186,24 @@ wise_man = None
 scan_lock = asyncio.Lock()
 trade_management_lock = asyncio.Lock()
 smart_brain = None
+# --- [إضافة جديدة] إعداد خادم الويب ---
+app = FastAPI()
+
+@app.get("/active_trades")
+async def get_active_trades():
+    """
+    نقطة النهاية هذه ستقوم بإرجاع قائمة الصفقات النشطة.
+    """
+    try:
+        async with aiosqlite.connect(DB_FILE) as conn:
+            conn.row_factory = aiosqlite.Row
+            cursor = await conn.execute("SELECT * FROM trades WHERE status = 'active'")
+            active_trades = await cursor.fetchall()
+            return [dict(row) for row in active_trades]
+    except Exception as e:
+        return {"error": str(e)}
+
+# --- نهاية الإضافة ---
 # --- وظائف مساعدة وقاعدة البيانات ---
 def load_settings():
     try:
@@ -2128,7 +2148,20 @@ async def post_shutdown(application: Application):
     logger.info("Bot has shut down gracefully.")
 
 def main():
-    logger.info("Starting Binance Adaptive Bot V6.6...")
+    logger.info("Starting Binance Bot with Web UI Server...")
+    
+    # إعداد وتشغيل خادم الويب في خيط منفصل
+    def run_api():
+        # نحن نستخدم IP 0.0.0.0 للسماح بالاتصالات الخارجية
+        uvicorn.run(app, host="0.0.0.0", port=8000, log_level="warning")
+
+    api_thread = threading.Thread(target=run_api)
+    api_thread.daemon = True  # هذا يضمن إغلاق الخادم عند إيقاف البوت
+    api_thread.start()
+    logger.info("Web UI Server started in background thread on port 8000.")
+
+    # إعداد وتشغيل البوت (الكود الأصلي الخاص بك)
+    logger.info("Starting Telegram Bot Polling...")
     app_builder = Application.builder().token(TELEGRAM_BOT_TOKEN)
     app_builder.post_init(post_init).post_shutdown(post_shutdown)
     application = app_builder.build()
@@ -2139,7 +2172,7 @@ def main():
     application.add_handler(CallbackQueryHandler(button_callback_handler))
     
     application.run_polling()
-    
+
 if __name__ == '__main__':
     main()
 
