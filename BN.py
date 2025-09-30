@@ -980,6 +980,30 @@ class BinanceWebSocketManager:
                     logger.warning(f"WebSocket Manager: Failed to keep listen key alive: {e}. It might have expired.")
                     self.listen_key = None 
 
+    # --- [الإضافة الجديدة] دالة تنسيق مدة الصفقة ---
+    def _format_duration(self, duration_delta: timedelta) -> str:
+        """
+        Formats a timedelta object into a readable Arabic string (days, hours, minutes).
+        """
+        seconds = duration_delta.total_seconds()
+        
+        if seconds < 60:
+            return "أقل من دقيقة"
+        
+        days, remainder = divmod(seconds, 86400)
+        hours, remainder = divmod(remainder, 3600)
+        minutes, _ = divmod(remainder, 60)
+        
+        parts = []
+        if days > 0:
+            parts.append(f"{int(days)} يوم")
+        if hours > 0:
+            parts.append(f"{int(hours)} ساعة")
+        if minutes > 0:
+            parts.append(f"{int(minutes)} دقيقة")
+            
+        return " و ".join(parts)
+
     async def run(self):
         self.is_running = True
         self.keep_alive_task = asyncio.create_task(self._keep_alive_listen_key())
@@ -1134,7 +1158,7 @@ class BinanceWebSocketManager:
             except Exception as e:
                 logger.error(f"Guardian Ticker Error for {symbol}: {e}", exc_info=True)
 
-
+    # --- [الدالة المُرقاة] ---
     async def _close_trade(self, conn, trade, reason, close_price):
         symbol, trade_id = trade['symbol'], trade['id']
         bot = self.application.bot
@@ -1191,14 +1215,60 @@ class BinanceWebSocketManager:
 
             await bot_data.exchange.create_market_sell_order(symbol, quantity_to_sell)
             
+            # --- 1. حساب النتائج المالية النهائية ---
             pnl = (close_price - trade['entry_price']) * quantity_to_sell
+            pnl_percent = (close_price / trade['entry_price'] - 1) * 100 if trade['entry_price'] > 0 else 0
+            is_profit = pnl >= 0
+
+            # --- 2. تحديث قاعدة البيانات ---
             await conn.execute("UPDATE trades SET status = ?, close_price = ?, pnl_usdt = ? WHERE id = ?", (reason, close_price, pnl, trade_id))
             await conn.commit()
             
+            # --- 3. مزامنة الاشتراكات ---
             await self.sync_subscriptions()
-            pnl_percent = (close_price / trade['entry_price'] - 1) * 100 if trade['entry_price'] > 0 else 0
-            emoji = "✅" if pnl >= 0 else "🛑"
-            await safe_send_message(bot, f"{emoji} **تم إغلاق الصفقة | #{trade_id} {symbol}**\n**السبب:** {reason}\n**الربح/الخسارة:** `${pnl:,.2f}` ({pnl_percent:+.2f}%)")
+
+            # --- 4. حساب المقاييس الجديدة للرسالة التحليلية ---
+            try:
+                # حساب مدة الصفقة
+                trade_entry_time = datetime.fromisoformat(trade['timestamp'])
+                duration_delta = datetime.now(EGYPT_TZ) - trade_entry_time
+                trade_duration = self._format_duration(duration_delta)
+
+                # حساب كفاءة الخروج (فقط للصفقات الرابحة)
+                exit_efficiency_str = ""
+                if is_profit and trade.get('highest_price', 0) > trade['entry_price']:
+                    peak_gain = trade['highest_price'] - trade['entry_price']
+                    actual_gain = close_price - trade['entry_price']
+                    if peak_gain > 0:
+                        efficiency = min((actual_gain / peak_gain) * 100, 100.0)
+                        exit_efficiency_str = f"🧠 *كفاءة الخروج:* {efficiency:.2f}%\n"
+            except Exception as e:
+                logger.error(f"Error calculating metrics for report on trade #{trade_id}: {e}")
+                trade_duration = "غير معروف"
+                exit_efficiency_str = ""
+
+            # --- 5. صياغة وإرسال الرسالة الجديدة المفصلة ---
+            title = "✅ ملف المهمة المكتملة" if is_profit else "🛑 ملف المهمة المغلقة"
+            profit_emoji = "💰" if is_profit else "💸"
+            reasons_ar = ' + '.join([STRATEGY_NAMES_AR.get(r.strip(), r.strip()) for r in trade['reason'].split(' + ')])
+
+            message_body = (
+                f"▫️ *العملة:* `{trade['symbol']}`\n"
+                f"▫️ *رقم الصفقة:* `{trade['id']}`\n"
+                f"▫️ *الاستراتيجية:* `{reasons_ar}`\n"
+                f"▫️ *سبب الإغلاق:* `{reason}`\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"{profit_emoji} *صافي الربح/الخسارة:* `${pnl:,.2f}` **({pnl_percent:,.2f}%)**\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"⏳ *مدة الصفقة:* {trade_duration}\n"
+                f"📉 *متوسط سعر الدخول:* `${trade['entry_price']:,.4f}`\n"
+                f"📈 *متوسط سعر الخروج:* `${close_price:,.4f}`\n"
+                f"🔝 *أعلى سعر وصلت إليه:* `${trade.get('highest_price', 0):,.4f}`\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"{exit_efficiency_str}"
+            )
+            final_message = f"**{title}**\n\n{message_body}"
+            await safe_send_message(bot, final_message)
 
         except (ccxt.InvalidOrder, ccxt.InsufficientFunds) as e:
              logger.warning(f"Closure for #{trade_id} failed with an expected trade rule error (e.g., dust), moving to incubator: {e}")
