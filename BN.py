@@ -1066,7 +1066,7 @@ class BinanceWebSocketManager:
         except Exception as e:
             logger.error(f"Error handling WebSocket message: {e}", exc_info=True)
 
-    async def _handle_ticker_update(self, ticker_data):
+   async def _handle_ticker_update(self, ticker_data):
         symbol = ticker_data['s'].replace('USDT', '/USDT')
         current_price = float(ticker_data['c'])
         
@@ -1126,21 +1126,33 @@ class BinanceWebSocketManager:
                                     await safe_send_message(self.application.bot, f"🚀 **تأمين الأرباح! | #{trade['id']} {trade['symbol']}**\nتم رفع وقف الخسارة إلى نقطة الدخول: `${new_sl:.4f}`")
                             
                             if trade.get('trailing_sl_active', False):
-                                current_sl = (await (await conn.execute("SELECT stop_loss FROM trades WHERE id = ?", (trade['id'],))).fetchone())[0]
-                                new_sl_candidate = highest_price * (1 - settings['trailing_sl_callback_percent'] / 100)
-                                if new_sl_candidate > current_sl:
-                                    await conn.execute("UPDATE trades SET stop_loss = ? WHERE id = ?", (new_sl_candidate, trade['id']))
+                                current_sl_res = await (await conn.execute("SELECT stop_loss FROM trades WHERE id = ?", (trade['id'],))).fetchone()
+                                if current_sl_res:
+                                    current_sl = current_sl_res[0]
+                                    new_sl_candidate = highest_price * (1 - settings['trailing_sl_callback_percent'] / 100)
+                                    if new_sl_candidate > current_sl:
+                                        await conn.execute("UPDATE trades SET stop_loss = ? WHERE id = ?", (new_sl_candidate, trade['id']))
 
-                        # منطق إشعارات الربح (كامل كما هو في ملفك)
+                        # منطق إشعارات الربح (مع إضافة منطق "حلب العملة")
                         if settings.get('incremental_notifications_enabled', True):
                             last_notified = trade.get('last_profit_notification_price', trade['entry_price'])
-                            increment = settings['incremental_notification_percent'] / 100
+                            increment = settings.get('incremental_notification_percent', 2.0) / 100
                             if current_price >= last_notified * (1 + increment):
                                 profit_percent = ((current_price / trade['entry_price']) - 1) * 100
                                 await safe_send_message(self.application.bot, f"📈 **ربح متزايد! | #{trade['id']} {trade['symbol']}**\n**الربح الحالي:** `{profit_percent:+.2f}%`")
                                 await conn.execute("UPDATE trades SET last_profit_notification_price = ? WHERE id = ?", (current_price, trade['id']))
-                        
-                        # --- [منطق الحارس الحكيم الجديد - الإضافة هنا] ---
+                                
+                                # --- [إضافة منطق حلب العملة هنا] ---
+                                cooldown_minutes = settings.get('wise_guardian_cooldown_minutes', 15)
+                                last_analysis_time = bot_data.last_deep_analysis_time.get(trade['id'], 0)
+                                if (time.time() - last_analysis_time) > (cooldown_minutes * 60):
+                                    bot_data.last_deep_analysis_time[trade['id']] = time.time()
+                                    updated_trade = dict(trade)
+                                    updated_trade['last_profit_notification_price'] = current_price
+                                    asyncio.create_task(wise_man.check_for_strong_momentum(updated_trade))
+                                # --- [نهاية الإضافة] ---
+
+                        # منطق الحارس الحكيم (قطع الخسائر)
                         if settings.get('wise_guardian_enabled', True) and trade.get('highest_price', 0) > 0:
                             drawdown_pct = ((current_price / trade['highest_price']) - 1) * 100
                             trigger_pct = settings.get('wise_guardian_trigger_pct', -1.5)
@@ -2130,4 +2142,3 @@ def main():
     
 if __name__ == '__main__':
     main()
-
