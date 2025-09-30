@@ -1066,8 +1066,7 @@ class BinanceWebSocketManager:
         except Exception as e:
             logger.error(f"Error handling WebSocket message: {e}", exc_info=True)
 
-     async def _handle_ticker_update(self, ticker_data):
-
+    async def _handle_ticker_update(self, ticker_data):
         symbol = ticker_data['s'].replace('USDT', '/USDT')
         current_price = float(ticker_data['c'])
         
@@ -2143,3 +2142,4 @@ def main():
     
 if __name__ == '__main__':
     main()
+
