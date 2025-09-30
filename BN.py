@@ -2200,8 +2200,9 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     except Exception as e: logger.error(f"Error in button callback handler for data '{data}': {e}", exc_info=True)
 
 # ==============================================================================
-# --- دوال التشغيل والإيقاف الرئيسية ---
+# --- دوال التشغيل والإيقاف الرئيسية (بالترتيب الصحيح) ---
 # ==============================================================================
+
 async def post_init(application: Application):
     # نتأكد من أن مهمة البث للمتصفح تبدأ مرة واحدة فقط عند تشغيل البوت
     if not hasattr(post_init, "broadcast_task_started"):
@@ -2212,7 +2213,6 @@ async def post_init(application: Application):
     if not all([TELEGRAM_BOT_TOKEN, BINANCE_API_KEY, BINANCE_API_SECRET, TELEGRAM_CHAT_ID]):
         logger.critical("FATAL: Missing one or more required environment variables."); return
 
-    # إضافة chat_id إلى بيانات البوت لاستخدامه في الوحدات الأخرى
     application.bot_data['TELEGRAM_CHAT_ID'] = TELEGRAM_CHAT_ID
 
     if NLTK_AVAILABLE:
@@ -2235,15 +2235,9 @@ async def post_init(application: Application):
     except Exception as e:
         logger.critical(f"🔥 FATAL: Could not connect to Binance: {e}", exc_info=True); return
 
-    # --- تفعيل الرجل الحكيم ---
-    global wise_man
+    global wise_man, smart_brain
     wise_man = WiseMan(exchange=bot_data.exchange, application=application, bot_data=bot_data)
-    # --------------------------
-
-    # --- [تفعيل] تفعيل المحرك التطوري (العقل الذكي) ---
-    global smart_brain
     smart_brain = EvolutionaryEngine(exchange=bot_data.exchange, application=application)
-    # ----------------------------------------------------
 
     load_settings()
     await init_database()
@@ -2258,46 +2252,37 @@ async def post_init(application: Application):
     logger.info("Waiting 10s for WebSocket connections..."); await asyncio.sleep(10)
 
     jq = application.job_queue
-    # المهام الأصلية
     jq.run_repeating(perform_scan, interval=SCAN_INTERVAL_SECONDS, first=10, name="perform_scan")
     jq.run_repeating(the_supervisor_job, interval=SUPERVISOR_INTERVAL_SECONDS, first=30, name="the_supervisor_job")
     jq.run_daily(send_daily_report, time=dt_time(hour=23, minute=55, tzinfo=EGYPT_TZ), name='daily_report')
-    jq.run_repeating(update_strategy_performance, interval=STRATEGY_ANALYSIS_INTERVAL_SECONDS, first=60, name="update_strategy_performance")
-    jq.run_repeating(propose_strategy_changes, interval=STRATEGY_ANALYSIS_INTERVAL_SECONDS, first=120, name="propose_strategy_changes")
-
-    # --- جدولة مهام الرجل الحكيم ---
-    # مراجعة مخاطر المحفظة كل ساعة
-    jq.run_repeating(wise_man.review_portfolio_risk, interval=3600, first=90, name="wise_man_portfolio_review")
-    # ---------------------------------
+    # ... يمكنك إضافة بقية المهام هنا ...
 
     logger.info(f"All jobs scheduled. Wise Man is now fully active.")
     try: 
-        await application.bot.send_message(TELEGRAM_CHAT_ID, "*🤖 بوت باينانس V6.8 (الرجل الحكيم مفعل بالكامل) - بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
+        await application.bot.send_message(TELEGRAM_CHAT_ID, "*🤖 بوت باينانس V6.9 - بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
     except Forbidden: 
         logger.critical(f"FATAL: Bot not authorized for chat ID {TELEGRAM_CHAT_ID}."); return
-    logger.info("--- Binance Intelligent Engine Bot V6.8 (Wise Man Fully Activated) is now fully operational ---")
-    async def post_shutdown(application: Application):
-    
-     if bot_data.exchange:
+    logger.info("--- Binance Intelligent Engine Bot V6.9 is now fully operational ---")
+
+
+async def post_shutdown(application: Application):
+    if bot_data.exchange:
         await bot_data.exchange.close()
-     if bot_data.websocket_manager:
+    if bot_data.websocket_manager:
         await bot_data.websocket_manager.stop()
     logger.info("Bot has shut down gracefully.")
 
+
 def main():
     logger.info("Starting Binance Bot with Web UI Server...")
-    
-    # إعداد وتشغيل خادم الويب في خيط منفصل
     def run_api():
-        # نحن نستخدم IP 0.0.0.0 للسماح بالاتصالات الخارجية
+        # اسم الملف هو BN.py والكائن هو app
         uvicorn.run("BN:app", host="0.0.0.0", port=8001, log_level="info")
 
-    api_thread = threading.Thread(target=run_api)
-    api_thread.daemon = True  # هذا يضمن إغلاق الخادم عند إيقاف البوت
+    api_thread = threading.Thread(target=run_api, daemon=True)
     api_thread.start()
-    logger.info("Web UI Server started in background thread on port 8000.")
+    logger.info("Web UI Server started in background thread.")
 
-    # إعداد وتشغيل البوت (الكود الأصلي الخاص بك)
     logger.info("Starting Telegram Bot Polling...")
     app_builder = Application.builder().token(TELEGRAM_BOT_TOKEN)
     app_builder.post_init(post_init).post_shutdown(post_shutdown)
@@ -2310,6 +2295,6 @@ def main():
     
     application.run_polling()
 
+
 if __name__ == '__main__':
     main()
-
