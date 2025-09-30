@@ -43,7 +43,8 @@ import ccxt.async_support as ccxt
 import feedparser
 import websockets
 import websockets.exceptions
-
+from fastapi import WebSocket, WebSocketDisconnect
+from fastapi.responses import HTMLResponse # استبدال FileResponse بهذا لمرونة أكبر
 # --- [ترقية] مكتبات جديدة للعقل المطور ---
 try:
     import nltk
@@ -189,6 +190,44 @@ scan_lock = asyncio.Lock()
 trade_management_lock = asyncio.Lock()
 smart_brain = None
 # --- [إضافة جديدة] إعداد خادم الويب ---
+# --- [إضافة جديدة] وحدة بث السجلات الحية ---
+class LogBroadcaster:
+    def __init__(self):
+        self.connections: list[WebSocket] = []
+        self.log_queue = asyncio.Queue()
+
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.connections.append(websocket)
+
+    def disconnect(self, websocket: WebSocket):
+        self.connections.remove(websocket)
+
+    async def broadcast(self):
+        while True:
+            message = await self.log_queue.get()
+            for connection in self.connections:
+                try:
+                    await connection.send_text(message)
+                except WebSocketDisconnect:
+                    # تم إغلاق الاتصال من طرف العميل
+                    pass # سيتم إزالته في المرة القادمة
+                except Exception:
+                    # تجاهل الأخطاء لمنع توقف البث
+                    pass
+
+# إنشاء نسخة من محطة البث
+log_broadcaster = LogBroadcaster()
+
+class WebsocketLogHandler(logging.Handler):
+    def emit(self, record):
+        log_entry = self.format(record)
+        try:
+            # نضع الرسالة في قائمة الانتظار ليتم بثها
+            log_broadcaster.log_queue.put_nowait(log_entry)
+        except asyncio.QueueFull:
+            pass # تجاهل الرسالة إذا كانت القائمة ممتلئة لتجنب حظر البوت
+# --- نهاية الإضافة ---
 app = FastAPI()
 
 app.add_middleware(
@@ -200,6 +239,33 @@ app.add_middleware(
 )
 
 @app.get("/")
+async def read_index():
+    with open("index.html") as f:
+        return HTMLResponse(f.read())
+
+@app.get("/active_trades")
+async def get_active_trades():
+    # ... (هذه الدالة تبقى كما هي)
+    try:
+        async with aiosqlite.connect(DB_FILE) as conn:
+            conn.row_factory = aiosqlite.Row
+            cursor = await conn.execute("SELECT * FROM trades WHERE status = 'active'")
+            active_trades = await cursor.fetchall()
+            return [dict(row) for row in active_trades]
+    except Exception as e:
+        return {"error": str(e)}
+
+# --- [إضافة جديدة] نقطة نهاية البث المباشر ---
+@app.websocket("/ws/logs")
+async def websocket_endpoint(websocket: WebSocket):
+    await log_broadcaster.connect(websocket)
+    try:
+        while True:
+            # إبقاء الاتصال مفتوحاً لاستقبال أي بيانات من العميل (غير مستخدم حالياً)
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        log_broadcaster.disconnect(websocket)
+# --- نهاية الإضافة ---
 async def read_index():
     return FileResponse('index.html')
 
@@ -2098,6 +2164,19 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
 # --- دوال التشغيل والإيقاف الرئيسية ---
 # ==============================================================================
 async def post_init(application: Application):
+    # --- [إضافة جديدة] تفعيل التقاط السجلات ---
+    handler = WebsocketLogHandler()
+    # يمكنك التحكم بمستوى السجلات التي تظهر (INFO, WARNING, ERROR)
+    handler.setLevel(logging.INFO) 
+    # قم بتنسيق شكل الرسالة التي ستظهر في الويب
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s', datefmt='%H:%M:%S')
+    handler.setFormatter(formatter)
+    logging.getLogger().addHandler(handler)
+    # ابدأ مهمة البث في الخلفية
+    asyncio.create_task(log_broadcaster.broadcast())
+    # --- نهاية الإضافة ---
+
+    logger.info("Performing post-initialization setup...")
     logger.info("Performing post-initialization setup for Intelligent Engine Bot...")
     if not all([TELEGRAM_BOT_TOKEN, BINANCE_API_KEY, BINANCE_API_SECRET, TELEGRAM_CHAT_ID]):
         logger.critical("FATAL: Missing one or more required environment variables."); return
