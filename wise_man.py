@@ -4,23 +4,10 @@ import pandas as pd
 import pandas_ta as ta
 import ccxt.async_support as ccxt
 from telegram.ext import Application
-from collections import defaultdict
 import asyncio
 
 logger = logging.getLogger(__name__)
 DB_FILE = 'trading_bot_v6.6_binance.db' 
-PORTFOLIO_RISK_RULES = {
-    "max_asset_concentration_pct": 30.0,
-    "max_sector_concentration_pct": 50.0,
-}
-SECTOR_MAP = {
-    'RNDR': 'AI', 'FET': 'AI', 'AGIX': 'AI',
-    'UNI': 'DeFi', 'AAVE': 'DeFi', 'LDO': 'DeFi',
-    'SOL': 'Layer 1', 'ETH': 'Layer 1', 'AVAX': 'Layer 1',
-    'DOGE': 'Memecoin', 'PEPE': 'Memecoin', 'SHIB': 'Memecoin',
-    'LINK': 'Oracle', 'BAND': 'Oracle',
-    'BTC': 'Layer 1'
-}
 
 class WiseMan:
     def __init__(self, exchange: ccxt.Exchange, application: Application, bot_data: object):
@@ -31,7 +18,6 @@ class WiseMan:
         logger.info("🧠 Wise Man module initialized as an On-Demand Tactical Advisor.")
 
     async def send_telegram_message(self, text):
-        """دالة مساعدة لإرسال رسائل تليجرام بشكل آمن."""
         try:
             if self.application and self.application.bot:
                 await self.application.bot.send_message(self.telegram_chat_id, text, parse_mode='Markdown')
@@ -39,16 +25,13 @@ class WiseMan:
             logger.error(f"Wise Man failed to send Telegram message: {e}")
 
     async def perform_deep_analysis(self, trade: dict):
-        """
-        [الوظيفة الجديدة] يتم استدعاء هذه الدالة لتحليل صفقة واحدة فقط بشكل عميق وفوري.
-        """
         symbol = trade['symbol']
         trade_id = trade['id']
         logger.info(f"🧠 Wise Man summoned for deep analysis of trade #{trade_id} [{symbol}]...")
 
         try:
+            # تم تعديل اسم ملف قاعدة البيانات ليتوافق مع الملف الأصلي
             async with aiosqlite.connect(DB_FILE) as conn:
-                # جلب بيانات السوق والبيتكوين بالتوازي لزيادة السرعة
                 ohlcv_task = self.exchange.fetch_ohlcv(symbol, '15m', limit=100)
                 btc_ohlcv_task = self.exchange.fetch_ohlcv('BTC/USDT', '1h', limit=100)
                 ohlcv, btc_ohlcv = await asyncio.gather(ohlcv_task, btc_ohlcv_task)
@@ -60,10 +43,8 @@ class WiseMan:
                 df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                 df['ema_fast'] = ta.ema(df['close'], length=10)
                 df['ema_slow'] = ta.ema(df['close'], length=30)
-
                 is_weak = df['close'].iloc[-1] < df['ema_fast'].iloc[-1] and df['close'].iloc[-1] < df['ema_slow'].iloc[-1]
 
-                # تحليل البيتكوين
                 btc_is_bearish = False
                 if btc_ohlcv:
                     btc_df = pd.DataFrame(btc_ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
@@ -88,6 +69,7 @@ class WiseMan:
             logger.error(f"Wise Man: Deep analysis failed for trade #{trade_id}: {e}", exc_info=True)
 
     async def review_portfolio_risk(self, context: object = None):
+       
         """
         تقوم هذه الدالة بفحص المحفظة ككل وإعطاء تنبيهات حول التركيز.
         """
