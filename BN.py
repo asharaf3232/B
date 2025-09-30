@@ -248,13 +248,18 @@ class LogBroadcaster:
             self.connections.remove(websocket)
 
     async def _broadcast_message(self, message: str):
-        # نستخدم نسخة من القائمة لتجنب الأخطاء إذا تم قطع اتصال أثناء الإرسال
-        for connection in list(self.connections):
-            try:
-                await connection.send_text(message)
-            except Exception:
-                # إذا فشل الإرسال، فهذا يعني أن الاتصال مغلق، لذا نزيله
-                self.disconnect(connection)
+    # نستخدم نسخة من القائمة لتجنب الأخطاء إذا تم قطع اتصال أثناء الإرسال
+    for connection in list(self.connections):
+        try:
+            await connection.send_text(message)
+        except Exception as e:
+            # --- الإضافة الجديدة هنا ---
+            # اطبع الخطأ الذي يحدث في الطرفية لنراه
+            print(f"!!!!!! BROADCAST ERROR: Failed to send message. Reason: {e} !!!!!!")
+            # --------------------------
+
+            # إذا فشل الإرسال، فهذا يعني أن الاتصال مغلق، لذا نزيله
+            self.disconnect(connection))
 
     async def broadcast_loop(self):
         """
@@ -2315,3 +2320,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
