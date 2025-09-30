@@ -34,6 +34,7 @@ import aiosqlite
 from fastapi import FastAPI
 import uvicorn
 import threading
+from fastapi.responses import FileResponse
 # --- مكتبات التحليل والتداول ---
 import pandas as pd
 import pandas_ta as ta
@@ -190,6 +191,9 @@ smart_brain = None
 app = FastAPI()
 
 @app.get("/active_trades")
+@app.get("/")
+async def read_index():
+    return FileResponse('index.html')
 async def get_active_trades():
     """
     نقطة النهاية هذه ستقوم بإرجاع قائمة الصفقات النشطة.
@@ -2175,7 +2179,6 @@ def main():
 
 if __name__ == '__main__':
     main()
-
 
 
 
