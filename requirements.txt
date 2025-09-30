@@ -8,3 +8,5 @@ investpy
 feedparser
 nltk
 binance-connector
+fastapi
+uvicorn[standard]
