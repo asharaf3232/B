@@ -4,6 +4,7 @@ import pandas as pd
 import pandas_ta as ta
 import ccxt.async_support as ccxt
 from telegram.ext import Application
+from collections import defaultdict
 import asyncio
 
 logger = logging.getLogger(__name__)
