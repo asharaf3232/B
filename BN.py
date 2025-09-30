@@ -253,15 +253,11 @@ class LogBroadcaster:
         try:
             await connection.send_text(message)
         except Exception as e:
-            # --- الإضافة الجديدة هنا ---
             # اطبع الخطأ الذي يحدث في الطرفية لنراه
             print(f"!!!!!! BROADCAST ERROR: Failed to send message. Reason: {e} !!!!!!")
-            # --------------------------
 
             # إذا فشل الإرسال، فهذا يعني أن الاتصال مغلق، لذا نزيله
-            self.disconnect(connection))
-
-    async def broadcast_loop(self):
+            self.disconnect(connection) # <<< تم إصلاح الخطأ هنا
         """
         هذه المهمة تعمل في الخلفية بشكل دائم، تسحب السجلات من قائمة الانتظار
         وترسلها إلى كل المتصفحات المتصلة.
@@ -2320,4 +2316,5 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
