@@ -267,7 +267,19 @@ class LogBroadcaster:
 
 log_broadcaster = LogBroadcaster()
 
-
+async def test_broadcast_messages():
+    """A simple loop to stuff test messages into the queue."""
+    counter = 0
+    while True:
+        await asyncio.sleep(3)
+        counter += 1
+        test_msg = f"--- TEST MESSAGE #{counter} FROM DIRECT LOOP ---"
+        try:
+            # نضع الرسالة مباشرة في قائمة الانتظار
+            log_broadcaster.log_queue.put_nowait(test_msg)
+        except Exception as e:
+            # نطبع أي خطأ يحدث هنا في الطرفية لنراه
+            print(f"ERROR IN TEST LOOP: {e}")
 # --- إعداد خادم الويب FastAPI ---
 app = FastAPI()
 
@@ -2204,9 +2216,14 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
 # ==============================================================================
 
 async def post_init(application: Application):
-    # نتأكد من أن مهمة البث للمتصفح تبدأ مرة واحدة فقط عند تشغيل البوت
+    # نتأكد من أن مهمة البث للمتصفح تبدأ مرة واحدة فقط
     if not hasattr(post_init, "broadcast_task_started"):
+        # 1. بدء مهمة البث الرئيسية
         asyncio.create_task(log_broadcaster.broadcast_loop())
+        
+        # 2. بدء مهمة بث رسائل الاختبار (الإضافة الجديدة)
+        asyncio.create_task(test_broadcast_messages())
+        
         post_init.broadcast_task_started = True
 
     logger.info("Performing post-initialization setup for Intelligent Engine Bot...")
@@ -2255,8 +2272,8 @@ async def post_init(application: Application):
     jq.run_repeating(perform_scan, interval=SCAN_INTERVAL_SECONDS, first=10, name="perform_scan")
     jq.run_repeating(the_supervisor_job, interval=SUPERVISOR_INTERVAL_SECONDS, first=30, name="the_supervisor_job")
     jq.run_daily(send_daily_report, time=dt_time(hour=23, minute=55, tzinfo=EGYPT_TZ), name='daily_report')
-    # ... يمكنك إضافة بقية المهام هنا ...
-
+    # ... يمكنك إضافة بقية المهام هنا إذا كانت موجودة في ملفك الأصلي ...
+    
     logger.info(f"All jobs scheduled. Wise Man is now fully active.")
     try: 
         await application.bot.send_message(TELEGRAM_CHAT_ID, "*🤖 بوت باينانس V6.9 - بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
