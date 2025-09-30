@@ -32,6 +32,7 @@ import httpx
 import re
 import aiosqlite
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 import threading
 from fastapi.responses import FileResponse
@@ -190,8 +191,32 @@ smart_brain = None
 # --- [إضافة جديدة] إعداد خادم الويب ---
 app = FastAPI()
 
-@app.get("/active_trades")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 @app.get("/")
+async def read_index():
+    return FileResponse('index.html')
+
+@app.get("/active_trades")
+async def get_active_trades():
+    """
+    نقطة النهاية هذه ستقوم بإرجاع قائمة الصفقات النشطة.
+    """
+    try:
+        async with aiosqlite.connect(DB_FILE) as conn:
+            conn.row_factory = aiosqlite.Row
+            cursor = await conn.execute("SELECT * FROM trades WHERE status = 'active'")
+            active_trades = await cursor.fetchall()
+            return [dict(row) for row in active_trades]
+    except Exception as e:
+        return {"error": str(e)}
+# --- نهاية الإضافة ---
 async def read_index():
     return FileResponse('index.html')
 async def get_active_trades():
