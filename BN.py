@@ -2028,7 +2028,7 @@ async def post_init(application: Application):
     # --- [تعطيل] ---
     #jq.run_repeating(wise_man.review_open_trades, interval=1800, first=45, name="wise_man_trade_review")
     # مراجعة مخاطر المحفظة كل ساعة
-    #jq.run_repeating(wise_man.review_portfolio_risk, interval=3600, first=90, name="wise_man_portfolio_review")
+    jq.run_repeating(wise_man.review_portfolio_risk, interval=3600, first=90, name="wise_man_portfolio_review")
     # ---------------------------------
 
     logger.info(f"All jobs scheduled. Wise Man is now fully active.")
@@ -2060,3 +2060,4 @@ def main():
     
 if __name__ == '__main__':
     main()
+
