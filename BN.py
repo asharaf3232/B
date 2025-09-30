@@ -123,12 +123,13 @@ DEFAULT_SETTINGS = {
     "strategy_deactivation_threshold_wr": 45.0,
     "dynamic_sizing_max_increase_pct": 25.0,
     "dynamic_sizing_max_decrease_pct": 50.0,
-    "wise_man_auto_close": True, # أضف هذا السطر
-    "wise_man_strong_profit_pct": 3.0, # نسبة الربح لاعتبار الزخم قوياً
-    "wise_man_strong_adx_level": 30,   # مستوى ADX لاعتبار الاتجاه قوياً
+    "wise_man_auto_close": True, 
+    "wise_man_strong_profit_pct": 3.0, 
+    "wise_man_strong_adx_level": 30,  
+    # --- [إضافة جديدة] ---
     "wise_guardian_enabled": True,
     "wise_guardian_trigger_pct": -1.5,
-    "wise_guardian_cooldown_minutes": 15, # وقت التبريد بعد تنفيذ إجراء حماية العين
+    "wise_guardian_cooldown_minutes": 15,
 }
 
 STRATEGY_NAMES_AR = {
@@ -174,6 +175,7 @@ class BotState:
         self.websocket_manager = None
         self.strategy_performance = {}
         self.pending_strategy_proposal = {}
+        # --- [إضافة جديدة] ---
         self.last_deep_analysis_time = defaultdict(float)
 
 bot_data = BotState()
@@ -1278,17 +1280,8 @@ async def the_supervisor_job(context: ContextTypes.DEFAULT_TYPE):
     
     logger.info("🕵️ Supervisor: Audit and recovery checks complete.")
 # ... (بقية كود واجهة تليجرام يبقى كما هو بدون تغيير جوهري) ...
-#/**************************** CodeGeeX Inline Diff ****************************/
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    print(f"Received /start command from user {update.effective_user.id}")
     keyboard = [["Dashboard 🖥️"], ["الإعدادات ⚙️"]]
-    print(f"Created keyboard with options: {keyboard}")
-    reply_text = "أهلاً بك في **بوت باينانس V6.6 (المحرك المدقق)**"
-    print(f"Sending reply text: {reply_text}")
-    await update.message.reply_text(reply_text, reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True), parse_mode=ParseMode.MARKDOWN)
-    print("Successfully sent start command reply")
-    await update.message.reply_text("أهلاً بك في **بوت باينانس V6.6 (المحرك المدقق)**", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True), parse_mode=ParseMode.MARKDOWN)
-#/******************** ea442203-295a-48c7-bc3a-56387a7ed9e6 ********************/
     await update.message.reply_text("أهلاً بك في **بوت باينانس V6.6 (المحرك المدقق)**", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True), parse_mode=ParseMode.MARKDOWN)
 
 async def manual_scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2032,7 +2025,7 @@ async def post_init(application: Application):
     jq.run_repeating(propose_strategy_changes, interval=STRATEGY_ANALYSIS_INTERVAL_SECONDS, first=120, name="propose_strategy_changes")
 
     # --- جدولة مهام الرجل الحكيم ---
-    # مراجعة الصفقات المفتوحة كل 30 دقيقة
+    # --- [تعطيل] ---
     #jq.run_repeating(wise_man.review_open_trades, interval=1800, first=45, name="wise_man_trade_review")
     # مراجعة مخاطر المحفظة كل ساعة
     #jq.run_repeating(wise_man.review_portfolio_risk, interval=3600, first=90, name="wise_man_portfolio_review")
@@ -2067,4 +2060,3 @@ def main():
     
 if __name__ == '__main__':
     main()
-
