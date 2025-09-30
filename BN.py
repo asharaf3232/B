@@ -31,11 +31,7 @@ from collections import defaultdict, Counter
 import httpx
 import re
 import aiosqlite
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-import uvicorn
-import threading
-from fastapi.responses import FileResponse
+
 # --- مكتبات التحليل والتداول ---
 import pandas as pd
 import pandas_ta as ta
@@ -43,8 +39,7 @@ import ccxt.async_support as ccxt
 import feedparser
 import websockets
 import websockets.exceptions
-from fastapi import WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse # استبدال FileResponse بهذا لمرونة أكبر
+
 # --- [ترقية] مكتبات جديدة للعقل المطور ---
 try:
     import nltk
@@ -72,48 +67,7 @@ from smart_engine import EvolutionaryEngine
 # --- إعدادات أساسية ---
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
-# --- [الحل النهائي للبث المباشر] ---
-# نحتفظ بالدوال الأصلية للتسجيل
-_original_log_info = logger.info
-_original_log_warning = logger.warning
-_original_log_error = logger.error
-_original_log_critical = logger.critical
 
-# نُعرّف دوال جديدة تقوم بوظيفتين: التسجيل العادي، وإرسال نسخة للمتصفح
-def new_log_info(msg, *args, **kwargs):
-    _original_log_info(msg, *args, **kwargs)
-    try:
-        formatted_msg = f"{datetime.now().strftime('%H:%M:%S')} - INFO - {msg}"
-        log_broadcaster.log_queue.put_nowait(formatted_msg)
-    except (asyncio.QueueFull, Exception): pass
-
-def new_log_warning(msg, *args, **kwargs):
-    _original_log_warning(msg, *args, **kwargs)
-    try:
-        formatted_msg = f"{datetime.now().strftime('%H:%M:%S')} - WARNING - {msg}"
-        log_broadcaster.log_queue.put_nowait(formatted_msg)
-    except (asyncio.QueueFull, Exception): pass
-        
-def new_log_error(msg, *args, **kwargs):
-    _original_log_error(msg, *args, **kwargs)
-    try:
-        formatted_msg = f"{datetime.now().strftime('%H:%M:%S')} - ERROR - {msg}"
-        log_broadcaster.log_queue.put_nowait(formatted_msg)
-    except (asyncio.QueueFull, Exception): pass
-        
-def new_log_critical(msg, *args, **kwargs):
-    _original_log_critical(msg, *args, **kwargs)
-    try:
-        formatted_msg = f"{datetime.now().strftime('%H:%M:%S')} - CRITICAL - {msg}"
-        log_broadcaster.log_queue.put_nowait(formatted_msg)
-    except (asyncio.QueueFull, Exception): pass
-
-# نستبدل دوال التسجيل القديمة بالنسخ الجديدة والمطورة
-logger.info = new_log_info
-logger.warning = new_log_warning
-logger.error = new_log_error
-logger.critical = new_log_critical
-# --- [نهاية الحل النهائي] ---
 # --- جلب المتغيرات من بيئة التشغيل ---
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
@@ -230,127 +184,6 @@ wise_man = None
 scan_lock = asyncio.Lock()
 trade_management_lock = asyncio.Lock()
 smart_brain = None
-# --- [إضافة جديدة] إعداد خادم الويب ---
-# --- [إضافة جديدة] وحدة بث السجلات الحية ---
-# --- [وحدة بث السجلات الحية - النسخة النهائية والمُحسّنة] ---
-class LogBroadcaster:
-    def __init__(self):
-        self.connections: list[WebSocket] = []
-        self.log_queue = asyncio.Queue(maxsize=100)
-
-    async def connect(self, websocket: WebSocket):
-        await websocket.accept()
-        self.connections.append(websocket)
-
-    def disconnect(self, websocket: WebSocket):
-        if websocket in self.connections:
-            self.connections.remove(websocket)
-
-    # --- الدالة الأولى: المسؤولة عن محاولة إرسال الرسائل ---
-    async def _broadcast_message(self, message: str):
-        # نستخدم نسخة من القائمة لتجنب الأخطاء إذا تم قطع اتصال أثناء الإرسال
-        for connection in list(self.connections):
-            try:
-                await connection.send_text(message)
-            except Exception as e:
-                # اطبع الخطأ الذي يحدث في الطرفية لنراه
-                print(f"!!!!!! BROADCAST ERROR: Failed to send message. Reason: {e} !!!!!!")
-                
-                # إذا فشل الإرسال، فهذا يعني أن الاتصال مغلق، لذا نزيله
-                self.disconnect(connection)
-
-    # --- الدالة الثانية: التي تعمل في الخلفية لسحب الرسائل من الانتظار ---
-    async def broadcast_loop(self):
-        """
-        هذه المهمة تعمل في الخلفية بشكل دائم، تسحب السجلات من قائمة الانتظار
-        وترسلها إلى كل المتصفحات المتصلة.
-        """
-        while True:
-            message = await self.log_queue.get()
-            await self._broadcast_message(message)
-async def test_broadcast_messages():
-    """A simple loop to stuff test messages into the queue."""
-    counter = 0
-    while True:
-        await asyncio.sleep(3)
-        counter += 1
-        test_msg = f"--- TEST MESSAGE #{counter} FROM DIRECT LOOP ---"
-        try:
-            # نضع الرسالة مباشرة في قائمة الانتظار
-            log_broadcaster.log_queue.put_nowait(test_msg)
-        except Exception as e:
-            # نطبع أي خطأ يحدث هنا في الطرفية لنراه
-            print(f"ERROR IN TEST LOOP: {e}")
-# --- إعداد خادم الويب FastAPI ---
-app = FastAPI()
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"], allow_credentials=True,
-    allow_methods=["*"], allow_headers=["*"],
-)
-
-@app.get("/", response_class=HTMLResponse)
-async def read_index():
-    with open("index.html", "r", encoding="utf-8") as f:
-        return HTMLResponse(content=f.read())
-
-@app.get("/active_trades")
-async def get_active_trades():
-    try:
-        async with aiosqlite.connect(DB_FILE) as conn:
-            conn.row_factory = aiosqlite.Row
-            cursor = await conn.execute("SELECT * FROM trades WHERE status = 'active'")
-            active_trades = await cursor.fetchall()
-            return [dict(row) for row in active_trades]
-    except Exception as e:
-        return {"error": str(e)}
-
-@app.websocket("/ws/logs")
-async def websocket_endpoint(websocket: WebSocket):
-    await log_broadcaster.connect(websocket)
-    try:
-        # نبقي الاتصال مفتوحاً وننتظر أي رسالة (لن يحدث)
-        # هذا فقط لإبقاء الاتصال حيًا حتى يغلقه المتصفح
-        while True:
-            await websocket.receive_text()
-    except WebSocketDisconnect:
-        # عندما يغلق المستخدم الصفحة، يتم تنفيذ هذا الجزء
-        log_broadcaster.disconnect(websocket)
-# --- نهاية الإضافة ---
-async def read_index():
-    return FileResponse('index.html')
-
-@app.get("/active_trades")
-async def get_active_trades():
-    """
-    نقطة النهاية هذه ستقوم بإرجاع قائمة الصفقات النشطة.
-    """
-    try:
-        async with aiosqlite.connect(DB_FILE) as conn:
-            conn.row_factory = aiosqlite.Row
-            cursor = await conn.execute("SELECT * FROM trades WHERE status = 'active'")
-            active_trades = await cursor.fetchall()
-            return [dict(row) for row in active_trades]
-    except Exception as e:
-        return {"error": str(e)}
-# --- نهاية الإضافة ---
-async def read_index():
-    return FileResponse('index.html')
-async def get_active_trades():
-    """
-    نقطة النهاية هذه ستقوم بإرجاع قائمة الصفقات النشطة.
-    """
-    try:
-        async with aiosqlite.connect(DB_FILE) as conn:
-            conn.row_factory = aiosqlite.Row
-            cursor = await conn.execute("SELECT * FROM trades WHERE status = 'active'")
-            active_trades = await cursor.fetchall()
-            return [dict(row) for row in active_trades]
-    except Exception as e:
-        return {"error": str(e)}
-
-# --- نهاية الإضافة ---
 # --- وظائف مساعدة وقاعدة البيانات ---
 def load_settings():
     try:
@@ -2213,24 +2046,14 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     except Exception as e: logger.error(f"Error in button callback handler for data '{data}': {e}", exc_info=True)
 
 # ==============================================================================
-# --- دوال التشغيل والإيقاف الرئيسية (بالترتيب الصحيح) ---
+# --- دوال التشغيل والإيقاف الرئيسية ---
 # ==============================================================================
-
 async def post_init(application: Application):
-    # نتأكد من أن مهمة البث للمتصفح تبدأ مرة واحدة فقط
-    if not hasattr(post_init, "broadcast_task_started"):
-        # 1. بدء مهمة البث الرئيسية
-        asyncio.create_task(log_broadcaster.broadcast_loop())
-        
-        # 2. بدء مهمة بث رسائل الاختبار (الإضافة الجديدة)
-        asyncio.create_task(test_broadcast_messages())
-        
-        post_init.broadcast_task_started = True
-
     logger.info("Performing post-initialization setup for Intelligent Engine Bot...")
     if not all([TELEGRAM_BOT_TOKEN, BINANCE_API_KEY, BINANCE_API_SECRET, TELEGRAM_CHAT_ID]):
         logger.critical("FATAL: Missing one or more required environment variables."); return
 
+    # إضافة chat_id إلى بيانات البوت لاستخدامه في الوحدات الأخرى
     application.bot_data['TELEGRAM_CHAT_ID'] = TELEGRAM_CHAT_ID
 
     if NLTK_AVAILABLE:
@@ -2253,9 +2076,15 @@ async def post_init(application: Application):
     except Exception as e:
         logger.critical(f"🔥 FATAL: Could not connect to Binance: {e}", exc_info=True); return
 
-    global wise_man, smart_brain
+    # --- تفعيل الرجل الحكيم ---
+    global wise_man
     wise_man = WiseMan(exchange=bot_data.exchange, application=application, bot_data=bot_data)
+    # --------------------------
+
+    # --- [تفعيل] تفعيل المحرك التطوري (العقل الذكي) ---  # <--- الإضافة الجديدة هنا
+    global smart_brain
     smart_brain = EvolutionaryEngine(exchange=bot_data.exchange, application=application)
+    # ----------------------------------------------------
 
     load_settings()
     await init_database()
@@ -2270,18 +2099,26 @@ async def post_init(application: Application):
     logger.info("Waiting 10s for WebSocket connections..."); await asyncio.sleep(10)
 
     jq = application.job_queue
+    # المهام الأصلية
     jq.run_repeating(perform_scan, interval=SCAN_INTERVAL_SECONDS, first=10, name="perform_scan")
     jq.run_repeating(the_supervisor_job, interval=SUPERVISOR_INTERVAL_SECONDS, first=30, name="the_supervisor_job")
     jq.run_daily(send_daily_report, time=dt_time(hour=23, minute=55, tzinfo=EGYPT_TZ), name='daily_report')
-    # ... يمكنك إضافة بقية المهام هنا إذا كانت موجودة في ملفك الأصلي ...
-    
+    jq.run_repeating(update_strategy_performance, interval=STRATEGY_ANALYSIS_INTERVAL_SECONDS, first=60, name="update_strategy_performance")
+    jq.run_repeating(propose_strategy_changes, interval=STRATEGY_ANALYSIS_INTERVAL_SECONDS, first=120, name="propose_strategy_changes")
+
+    # --- جدولة مهام الرجل الحكيم ---
+    # --- [تعطيل] ---
+    #jq.run_repeating(wise_man.review_open_trades, interval=1800, first=45, name="wise_man_trade_review")
+    # مراجعة مخاطر المحفظة كل ساعة
+    jq.run_repeating(wise_man.review_portfolio_risk, interval=3600, first=90, name="wise_man_portfolio_review")
+    # ---------------------------------
+
     logger.info(f"All jobs scheduled. Wise Man is now fully active.")
     try: 
-        await application.bot.send_message(TELEGRAM_CHAT_ID, "*🤖 بوت باينانس V6.9 - بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
+        await application.bot.send_message(TELEGRAM_CHAT_ID, "*🤖 بوت باينانس V6.8 (الرجل الحكيم مفعل بالكامل) - بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
     except Forbidden: 
         logger.critical(f"FATAL: Bot not authorized for chat ID {TELEGRAM_CHAT_ID}."); return
-    logger.info("--- Binance Intelligent Engine Bot V6.9 is now fully operational ---")
-
+    logger.info("--- Binance Intelligent Engine Bot V6.8 (Wise Man Fully Activated) is now fully operational ---")
 
 async def post_shutdown(application: Application):
     if bot_data.exchange:
@@ -2290,18 +2127,8 @@ async def post_shutdown(application: Application):
         await bot_data.websocket_manager.stop()
     logger.info("Bot has shut down gracefully.")
 
-
 def main():
-    logger.info("Starting Binance Bot with Web UI Server...")
-    def run_api():
-        # اسم الملف هو BN.py والكائن هو app
-        uvicorn.run("BN:app", host="0.0.0.0", port=8001, log_level="info")
-
-    api_thread = threading.Thread(target=run_api, daemon=True)
-    api_thread.start()
-    logger.info("Web UI Server started in background thread.")
-
-    logger.info("Starting Telegram Bot Polling...")
+    logger.info("Starting Binance Adaptive Bot V6.6...")
     app_builder = Application.builder().token(TELEGRAM_BOT_TOKEN)
     app_builder.post_init(post_init).post_shutdown(post_shutdown)
     application = app_builder.build()
@@ -2312,11 +2139,6 @@ def main():
     application.add_handler(CallbackQueryHandler(button_callback_handler))
     
     application.run_polling()
-
-
+    
 if __name__ == '__main__':
     main()
-
-
-
-
