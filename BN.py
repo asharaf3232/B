@@ -236,7 +236,6 @@ smart_brain = None
 class LogBroadcaster:
     def __init__(self):
         self.connections: list[WebSocket] = []
-        # تحديد حجم أقصى لقائمة الانتظار لمنع استهلاك الذاكرة
         self.log_queue = asyncio.Queue(maxsize=100)
 
     async def connect(self, websocket: WebSocket):
@@ -247,17 +246,21 @@ class LogBroadcaster:
         if websocket in self.connections:
             self.connections.remove(websocket)
 
+    # --- الدالة الأولى: المسؤولة عن محاولة إرسال الرسائل ---
     async def _broadcast_message(self, message: str):
-    # نستخدم نسخة من القائمة لتجنب الأخطاء إذا تم قطع اتصال أثناء الإرسال
-    for connection in list(self.connections):
-        try:
-            await connection.send_text(message)
-        except Exception as e:
-            # اطبع الخطأ الذي يحدث في الطرفية لنراه
-            print(f"!!!!!! BROADCAST ERROR: Failed to send message. Reason: {e} !!!!!!")
-            
-            # إذا فشل الإرسال، فهذا يعني أن الاتصال مغلق، لذا نزيله
-            self.disconnect(connection)
+        # نستخدم نسخة من القائمة لتجنب الأخطاء إذا تم قطع اتصال أثناء الإرسال
+        for connection in list(self.connections):
+            try:
+                await connection.send_text(message)
+            except Exception as e:
+                # اطبع الخطأ الذي يحدث في الطرفية لنراه
+                print(f"!!!!!! BROADCAST ERROR: Failed to send message. Reason: {e} !!!!!!")
+                
+                # إذا فشل الإرسال، فهذا يعني أن الاتصال مغلق، لذا نزيله
+                self.disconnect(connection)
+
+    # --- الدالة الثانية: التي تعمل في الخلفية لسحب الرسائل من الانتظار ---
+    async def broadcast_loop(self):
         """
         هذه المهمة تعمل في الخلفية بشكل دائم، تسحب السجلات من قائمة الانتظار
         وترسلها إلى كل المتصفحات المتصلة.
@@ -265,9 +268,6 @@ class LogBroadcaster:
         while True:
             message = await self.log_queue.get()
             await self._broadcast_message(message)
-
-log_broadcaster = LogBroadcaster()
-
 async def test_broadcast_messages():
     """A simple loop to stuff test messages into the queue."""
     counter = 0
@@ -2316,6 +2316,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
