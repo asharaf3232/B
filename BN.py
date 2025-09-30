@@ -2153,7 +2153,7 @@ def main():
     # إعداد وتشغيل خادم الويب في خيط منفصل
     def run_api():
         # نحن نستخدم IP 0.0.0.0 للسماح بالاتصالات الخارجية
-        uvicorn.run(app, host="0.0.0.0", port=8000, log_level="warning")
+        uvicorn.run("BN:app", host="0.0.0.0", port=8000, log_level="info")
 
     api_thread = threading.Thread(target=run_api)
     api_thread.daemon = True  # هذا يضمن إغلاق الخادم عند إيقاف البوت
@@ -2175,5 +2175,6 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
