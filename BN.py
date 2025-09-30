@@ -126,6 +126,9 @@ DEFAULT_SETTINGS = {
     "wise_man_auto_close": True, # أضف هذا السطر
     "wise_man_strong_profit_pct": 3.0, # نسبة الربح لاعتبار الزخم قوياً
     "wise_man_strong_adx_level": 30,   # مستوى ADX لاعتبار الاتجاه قوياً
+    "wise_guardian_enabled": True,
+    "wise_guardian_trigger_pct": -1.5,
+    "wise_guardian_cooldown_minutes": 15, # وقت التبريد بعد تنفيذ إجراء حماية العين
 }
 
 STRATEGY_NAMES_AR = {
@@ -171,6 +174,7 @@ class BotState:
         self.websocket_manager = None
         self.strategy_performance = {}
         self.pending_strategy_proposal = {}
+        self.last_deep_analysis_time = defaultdict(float)
 
 bot_data = BotState()
 # لا تضع هذا السطر داخل الدالة، بل في الأعلى
@@ -1044,11 +1048,10 @@ class BinanceWebSocketManager:
             try:
                 async with aiosqlite.connect(DB_FILE) as conn:
                     conn.row_factory = aiosqlite.Row
-                    # نبحث عن كل الحالات التي قد تستدعي أي إجراء
                     trade = await (await conn.execute("SELECT * FROM trades WHERE symbol = ? AND status IN ('active', 'force_exit', 'retry_exit')", (symbol,))).fetchone()
                     
                     if not trade:
-                        return # إذا لم نجد صفقة، لا نفعل شيئًا
+                        return
 
                     trade = dict(trade)
                     settings = bot_data.settings
@@ -1080,29 +1083,29 @@ class BinanceWebSocketManager:
                     # --- [التنفيذ] ---
                     if should_close:
                         await self._close_trade(conn, trade, close_reason, current_price)
-                        return # نخرج فورًا بعد بدء الإغلاق
+                        return
 
                     # --- [منطق إدارة الصفقات النشطة (يعمل فقط إذا لم يكن هناك قرار إغلاق)] ---
                     if trade['status'] == 'active':
-                        # منطق الوقف المتحرك
-                        if settings['trailing_sl_enabled']:
-                            highest_price = max(trade.get('highest_price', 0), current_price)
-                            if highest_price > trade.get('highest_price', 0):
-                                await conn.execute("UPDATE trades SET highest_price = ? WHERE id = ?", (highest_price, trade['id']))
+                        highest_price = max(trade.get('highest_price', 0), current_price)
+                        if highest_price > trade.get('highest_price', 0):
+                            await conn.execute("UPDATE trades SET highest_price = ? WHERE id = ?", (highest_price, trade['id']))
 
+                        # منطق الوقف المتحرك (كامل كما هو في ملفك)
+                        if settings['trailing_sl_enabled']:
                             if not trade.get('trailing_sl_active', False) and current_price >= trade['entry_price'] * (1 + settings['trailing_sl_activation_percent'] / 100):
                                 new_sl = trade['entry_price'] * 1.001
                                 if new_sl > trade['stop_loss']:
                                     await conn.execute("UPDATE trades SET trailing_sl_active = 1, stop_loss = ? WHERE id = ?", (new_sl, trade['id']))
                                     await safe_send_message(self.application.bot, f"🚀 **تأمين الأرباح! | #{trade['id']} {trade['symbol']}**\nتم رفع وقف الخسارة إلى نقطة الدخول: `${new_sl:.4f}`")
                             
-                            if trade.get('trailing_sl_active', False): # نتحقق مرة أخرى في حال تم تفعيله للتو
+                            if trade.get('trailing_sl_active', False):
                                 current_sl = (await (await conn.execute("SELECT stop_loss FROM trades WHERE id = ?", (trade['id'],))).fetchone())[0]
                                 new_sl_candidate = highest_price * (1 - settings['trailing_sl_callback_percent'] / 100)
                                 if new_sl_candidate > current_sl:
                                     await conn.execute("UPDATE trades SET stop_loss = ? WHERE id = ?", (new_sl_candidate, trade['id']))
 
-                        # منطق إشعارات الربح
+                        # منطق إشعارات الربح (كامل كما هو في ملفك)
                         if settings.get('incremental_notifications_enabled', True):
                             last_notified = trade.get('last_profit_notification_price', trade['entry_price'])
                             increment = settings['incremental_notification_percent'] / 100
@@ -1110,6 +1113,19 @@ class BinanceWebSocketManager:
                                 profit_percent = ((current_price / trade['entry_price']) - 1) * 100
                                 await safe_send_message(self.application.bot, f"📈 **ربح متزايد! | #{trade['id']} {trade['symbol']}**\n**الربح الحالي:** `{profit_percent:+.2f}%`")
                                 await conn.execute("UPDATE trades SET last_profit_notification_price = ? WHERE id = ?", (current_price, trade['id']))
+                        
+                        # --- [منطق الحارس الحكيم الجديد - الإضافة هنا] ---
+                        if settings.get('wise_guardian_enabled', True) and trade.get('highest_price', 0) > 0:
+                            drawdown_pct = ((current_price / trade['highest_price']) - 1) * 100
+                            trigger_pct = settings.get('wise_guardian_trigger_pct', -1.5)
+                            
+                            if drawdown_pct < trigger_pct:
+                                cooldown_minutes = settings.get('wise_guardian_cooldown_minutes', 15)
+                                last_analysis_time = bot_data.last_deep_analysis_time.get(trade['id'], 0)
+                                
+                                if (time.time() - last_analysis_time) > (cooldown_minutes * 60):
+                                    bot_data.last_deep_analysis_time[trade['id']] = time.time()
+                                    asyncio.create_task(wise_man.perform_deep_analysis(trade))
                         
                         await conn.commit()
             
@@ -2017,9 +2033,9 @@ async def post_init(application: Application):
 
     # --- جدولة مهام الرجل الحكيم ---
     # مراجعة الصفقات المفتوحة كل 30 دقيقة
-    jq.run_repeating(wise_man.review_open_trades, interval=1800, first=45, name="wise_man_trade_review")
+    #jq.run_repeating(wise_man.review_open_trades, interval=1800, first=45, name="wise_man_trade_review")
     # مراجعة مخاطر المحفظة كل ساعة
-    jq.run_repeating(wise_man.review_portfolio_risk, interval=3600, first=90, name="wise_man_portfolio_review")
+    #jq.run_repeating(wise_man.review_portfolio_risk, interval=3600, first=90, name="wise_man_portfolio_review")
     # ---------------------------------
 
     logger.info(f"All jobs scheduled. Wise Man is now fully active.")
@@ -2051,5 +2067,4 @@ def main():
     
 if __name__ == '__main__':
     main()
-
 
