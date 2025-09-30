@@ -2186,6 +2186,7 @@ async def post_init(application: Application):
     if not hasattr(post_init, "broadcast_task_started"):
         asyncio.create_task(log_broadcaster.broadcast_loop())
         post_init.broadcast_task_started = True
+        logger.critical("!!!!!!!!!! رسالة اختبار حرجة من البوت !!!!!!!!!!!")
     # --- نهاية قسم تفعيل السجلات ---
 
     logger.info("Performing post-initialization setup for Intelligent Engine Bot...")
@@ -2291,4 +2292,5 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
