@@ -255,9 +255,9 @@ class LogBroadcaster:
         except Exception as e:
             # اطبع الخطأ الذي يحدث في الطرفية لنراه
             print(f"!!!!!! BROADCAST ERROR: Failed to send message. Reason: {e} !!!!!!")
-
+            
             # إذا فشل الإرسال، فهذا يعني أن الاتصال مغلق، لذا نزيله
-            self.disconnect(connection) # <<< تم إصلاح الخطأ هنا
+            self.disconnect(connection)
         """
         هذه المهمة تعمل في الخلفية بشكل دائم، تسحب السجلات من قائمة الانتظار
         وترسلها إلى كل المتصفحات المتصلة.
@@ -2316,5 +2316,6 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
